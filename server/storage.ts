@@ -12,9 +12,9 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { eq, asc } from "drizzle-orm";
 
-const DB_PATH = process.env.DB_PATH || "data.db";
+const DB_PATH = process.env.DB_PATH || (process.env.NODE_ENV === "production" ? "/tmp/data.db" : "data.db");
 const sqlite = new Database(DB_PATH);
-sqlite.pragma("journal_mode = WAL");
+try { sqlite.pragma("journal_mode = WAL"); } catch (e) { /* WAL not supported on this fs */ }
 
 // Create tables if they don't exist
 sqlite.exec(`
