@@ -103,7 +103,7 @@ function WmbtTracker({
 
   const addMutation = useMutation({
     mutationFn: (text: string) =>
-      apiRequest("POST", `/api/wmbt/${ticker}`, { text, status: "unverified" }).then((r) => r.json()),
+      apiRequest("POST", `/api/wmbt/${ticker}`, { condition: text, status: "unverified" }).then((r) => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/wmbt/${ticker}`] });
       setNewItem("");
@@ -113,21 +113,21 @@ function WmbtTracker({
 
   const patchMutation = useMutation({
     mutationFn: ({ id, status }: { id: number; status: string }) =>
-      apiRequest("PATCH", `/api/wmbt/${ticker}/${id}`, { status }).then((r) => r.json()),
+      apiRequest("PATCH", `/api/wmbt/${id}`, { status }).then((r) => r.json()),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: [`/api/wmbt/${ticker}`] }),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) =>
-      apiRequest("DELETE", `/api/wmbt/${ticker}/${id}`),
+      apiRequest("DELETE", `/api/wmbt/${id}`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: [`/api/wmbt/${ticker}`] }),
   });
 
   const importMutation = useMutation({
     mutationFn: async () => {
       for (const text of thesisItems) {
-        if (!wmbtItems.some((w) => w.text === text)) {
-          await apiRequest("POST", `/api/wmbt/${ticker}`, { text, status: "unverified" });
+        if (!wmbtItems.some((w) => w.condition === text)) {
+          await apiRequest("POST", `/api/wmbt/${ticker}`, { condition: text, status: "unverified" });
         }
       }
     },
@@ -194,7 +194,7 @@ function WmbtTracker({
               <div className="pt-0.5">
                 <WmbtStatusIcon status={item.status} />
               </div>
-              <span className="flex-1 text-xs text-foreground/80 leading-relaxed">{item.text}</span>
+              <span className="flex-1 text-xs text-foreground/80 leading-relaxed">{item.condition}</span>
               {/* Status selector */}
               <select
                 value={item.status}
@@ -662,7 +662,16 @@ export default function ThesisPage() {
       await queryClient.invalidateQueries({ queryKey: ["/api/theses"] });
       toast({ title: `Thesis generated for ${ticker}` });
     } catch (err: any) {
-      toast({ title: `Failed to generate thesis for ${ticker}`, variant: "destructive" });
+      // apiRequest throws "STATUS: body" — try to extract inner message
+      let msg = err.message || "Unknown error";
+      try {
+        const jsonStart = msg.indexOf("{");
+        if (jsonStart >= 0) {
+          const parsed = JSON.parse(msg.slice(jsonStart));
+          msg = parsed.error || msg;
+        }
+      } catch {}
+      toast({ title: `Thesis failed: ${msg}`, variant: "destructive" });
     }
     setGeneratingThesis(null);
   };
@@ -686,7 +695,15 @@ export default function ThesisPage() {
       await queryClient.invalidateQueries({ queryKey: ["/api/devils-advocates"] });
       toast({ title: `Bear case generated for ${ticker}` });
     } catch (err: any) {
-      toast({ title: `Failed to generate bear case for ${ticker}`, variant: "destructive" });
+      let msg = err.message || "Unknown error";
+      try {
+        const jsonStart = msg.indexOf("{");
+        if (jsonStart >= 0) {
+          const parsed = JSON.parse(msg.slice(jsonStart));
+          msg = parsed.error || msg;
+        }
+      } catch {}
+      toast({ title: `Bear case failed: ${msg}`, variant: "destructive" });
     }
     setGeneratingDA(null);
   };

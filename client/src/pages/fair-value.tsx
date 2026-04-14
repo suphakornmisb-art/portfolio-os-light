@@ -5,7 +5,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { RefreshCw, TrendingDown, TrendingUp, Minus, ChevronDown, ChevronUp } from "lucide-react";
+import { RefreshCw, TrendingDown, TrendingUp, Minus, ChevronDown, ChevronUp, Zap } from "lucide-react";
 import { useCurrency } from "@/contexts/CurrencyContext";
 
 interface FairValueItem {
@@ -146,6 +146,12 @@ function FairValueCard({ item }: { item: FairValueItem }) {
 
 export default function FairValuePage() {
   const { toast } = useToast();
+  const [enrichingTicker, setEnrichingTicker] = useState<string | null>(null);
+
+  const { data: holdings = [] } = useQuery<any[]>({
+    queryKey: ["/api/holdings"],
+    staleTime: 300000,
+  });
 
   const { data: fairValues = [], isLoading } = useQuery<FairValueItem[]>({
     queryKey: ["/api/fair-value"],
@@ -155,19 +161,51 @@ export default function FairValuePage() {
   const enrichAllMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/enrichments/refresh-all");
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Server error" }));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
       return res.json();
     },
     onSuccess: (data) => {
-      toast({ title: `Enriched ${data.enriched} holdings` });
+      toast({ title: `Enriched ${data.enriched}/${data.total} holdings` });
       queryClient.invalidateQueries({ queryKey: ["/api/fair-value"] });
       queryClient.invalidateQueries({ queryKey: ["/api/enrichments"] });
     },
-    onError: () => {
-      toast({ title: "Enrichment failed", variant: "destructive" });
+    onError: (err: any) => {
+      toast({ title: `Enrichment failed: ${err.message}`, variant: "destructive" });
+    },
+  });
+
+  const enrichOneMutation = useMutation({
+    mutationFn: async (ticker: string) => {
+      setEnrichingTicker(ticker);
+      const res = await apiRequest("POST", "/api/enrichments/refresh", { ticker });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Server error" }));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      return res.json();
+    },
+    onSuccess: (data, ticker) => {
+      setEnrichingTicker(null);
+      if (data.skipped) {
+        toast({ title: `${ticker} skipped (ETF — no fundamental data)` });
+      } else {
+        toast({ title: `${ticker} enriched` });
+      }
+      queryClient.invalidateQueries({ queryKey: ["/api/fair-value"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/enrichments"] });
+    },
+    onError: (err: any, ticker) => {
+      setEnrichingTicker(null);
+      toast({ title: `Failed to enrich ${ticker}: ${err.message}`, variant: "destructive" });
     },
   });
 
   const sorted = [...fairValues].sort((a, b) => a.pfv_ratio - b.pfv_ratio);
+  const enrichedTickers = new Set(sorted.map((v) => v.ticker));
+  const unenrichedHoldings = holdings.filter((h) => !enrichedTickers.has(h.ticker));
   const undervalued = sorted.filter((v) => v.valuation_label === "Deep Discount" || v.valuation_label === "Discount").length;
   const fair = sorted.filter((v) => v.valuation_label === "Fair Range").length;
   const overvalued = sorted.filter((v) => v.valuation_label === "Premium" || v.valuation_label === "Rich").length;
@@ -190,7 +228,7 @@ export default function FairValuePage() {
           className="gap-1.5"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${enrichAllMutation.isPending ? "animate-spin" : ""}`} />
-          {enrichAllMutation.isPending ? "Enriching…" : "Enrich All"}
+          {enrichAllMutation.isPending ? "Fetching fundamentals…" : `Enrich All (${holdings.length - sorted.length} pending)`}
         </Button>
       </div>
 
@@ -233,15 +271,53 @@ export default function FairValuePage() {
           {[...Array(9)].map((_, i) => <Skeleton key={i} className="h-36 rounded-lg" />)}
         </div>
       ) : sorted.length === 0 ? (
-        <div className="rounded-lg border border-border bg-card p-8 text-center">
-          <p className="text-sm text-muted-foreground mb-2">No fair value data yet.</p>
-          <p className="text-xs text-muted-foreground">Click "Enrich All" to fetch fundamental data from FMP and compute fair values.</p>
+        <div className="rounded-lg border border-border bg-card p-8 text-center space-y-3">
+          <p className="text-sm font-medium text-foreground">No fair value data yet</p>
+          <p className="text-xs text-muted-foreground">
+            Click "Enrich All" to fetch fundamental data from FMP and compute fair values.<br/>
+            ETFs (SCHD, VOO, VXUS, IWF, VTV) are skipped — no per-share fundamentals.
+          </p>
+          <Button size="sm" onClick={() => enrichAllMutation.mutate()} disabled={enrichAllMutation.isPending} className="gap-1.5">
+            <RefreshCw className={`h-3.5 w-3.5 ${enrichAllMutation.isPending ? "animate-spin" : ""}`} />
+            {enrichAllMutation.isPending ? "Fetching fundamentals…" : "Enrich All"}
+          </Button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {sorted.map((item) => (
-            <FairValueCard key={item.ticker} item={item} />
-          ))}
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {sorted.map((item) => (
+              <FairValueCard key={item.ticker} item={item} />
+            ))}
+          </div>
+
+          {unenrichedHoldings.length > 0 && (
+            <div>
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+                Not yet enriched ({unenrichedHoldings.length})
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {unenrichedHoldings.map((h) => (
+                  <div key={h.ticker} className="rounded-lg border border-border bg-card/50 p-3 flex items-center justify-between gap-3">
+                    <div>
+                      <span className="font-mono text-sm font-semibold text-foreground">{h.ticker}</span>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">{h.sector}</p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => enrichOneMutation.mutate(h.ticker)}
+                      disabled={enrichingTicker === h.ticker || enrichAllMutation.isPending}
+                      className="h-7 text-xs gap-1 flex-shrink-0"
+                      data-testid={`button-enrich-${h.ticker}`}
+                    >
+                      <Zap className={`h-3 w-3 ${enrichingTicker === h.ticker ? "animate-pulse" : ""}`} />
+                      {enrichingTicker === h.ticker ? "…" : "Enrich"}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
