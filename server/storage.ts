@@ -8,6 +8,11 @@ import type {
   DevilsAdvocate, InsertDevilsAdvocate,
   WmbtItem, InsertWmbtItem,
   PriceAlert, InsertPriceAlert,
+  WatchlistItem, InsertWatchlist,
+  Milestone, InsertMilestone,
+  DividendLog, InsertDividendLog,
+  Transaction, InsertTransaction,
+  ScenarioRun, InsertScenarioRun,
 } from "@shared/schema";
 
 // ── Turso client ──────────────────────────────────────────────────────────────
@@ -131,6 +136,55 @@ export async function initDb(): Promise<void> {
       triggered    INTEGER NOT NULL DEFAULT 0,
       triggered_at TEXT,
       created_at   TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS watchlist (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticker      TEXT NOT NULL UNIQUE,
+      buy_below   REAL,
+      notes       TEXT NOT NULL DEFAULT '',
+      sector      TEXT NOT NULL DEFAULT '',
+      created_at  TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS milestones (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      label         TEXT NOT NULL,
+      target_value  REAL NOT NULL,
+      target_date   TEXT,
+      notes         TEXT NOT NULL DEFAULT '',
+      achieved      INTEGER NOT NULL DEFAULT 0,
+      achieved_at   TEXT,
+      created_at    TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS dividends_log (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticker        TEXT NOT NULL,
+      amount_usd    REAL NOT NULL,
+      received_date TEXT NOT NULL,
+      notes         TEXT NOT NULL DEFAULT '',
+      created_at    TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS transactions (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticker        TEXT NOT NULL,
+      action        TEXT NOT NULL DEFAULT 'buy',
+      shares        REAL NOT NULL,
+      price_usd     REAL NOT NULL,
+      amount_usd    REAL NOT NULL,
+      tx_date       TEXT NOT NULL,
+      notes         TEXT NOT NULL DEFAULT '',
+      created_at    TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS scenario_runs (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      scenario_id   TEXT NOT NULL,
+      severity      TEXT NOT NULL,
+      result_json   TEXT NOT NULL,
+      run_at        TEXT NOT NULL
     );
   `);
 }
@@ -265,6 +319,65 @@ function toPriceAlert(r: Record<string, any>): PriceAlert {
   };
 }
 
+function toWatchlistItem(r: Record<string, any>): WatchlistItem {
+  return {
+    id:         r.id as number,
+    ticker:     r.ticker as string,
+    buy_below:  r.buy_below as number | null,
+    notes:      r.notes as string,
+    sector:     r.sector as string,
+    created_at: r.created_at as string,
+  };
+}
+
+function toMilestone(r: Record<string, any>): Milestone {
+  return {
+    id:           r.id as number,
+    label:        r.label as string,
+    target_value: r.target_value as number,
+    target_date:  r.target_date as string | null,
+    notes:        r.notes as string,
+    achieved:     Boolean(r.achieved),
+    achieved_at:  r.achieved_at as string | null,
+    created_at:   r.created_at as string,
+  };
+}
+
+function toDividendLog(r: Record<string, any>): DividendLog {
+  return {
+    id:            r.id as number,
+    ticker:        r.ticker as string,
+    amount_usd:    r.amount_usd as number,
+    received_date: r.received_date as string,
+    notes:         r.notes as string,
+    created_at:    r.created_at as string,
+  };
+}
+
+function toTransaction(r: Record<string, any>): Transaction {
+  return {
+    id:         r.id as number,
+    ticker:     r.ticker as string,
+    action:     r.action as string,
+    shares:     r.shares as number,
+    price_usd:  r.price_usd as number,
+    amount_usd: r.amount_usd as number,
+    tx_date:    r.tx_date as string,
+    notes:      r.notes as string,
+    created_at: r.created_at as string,
+  };
+}
+
+function toScenarioRun(r: Record<string, any>): ScenarioRun {
+  return {
+    id:          r.id as number,
+    scenario_id: r.scenario_id as string,
+    severity:    r.severity as string,
+    result_json: r.result_json as string,
+    run_at:      r.run_at as string,
+  };
+}
+
 /** Execute a query and return typed rows */
 async function query<T>(
   sql: string,
@@ -332,6 +445,34 @@ export interface IStorage {
   deleteAlert(id: number): Promise<void>;
   getUntriggeredAlerts(): Promise<PriceAlert[]>;
   markAlertTriggered(id: number, triggeredAt: string): Promise<void>;
+
+  // Watchlist
+  getAllWatchlist(): Promise<WatchlistItem[]>;
+  addToWatchlist(data: InsertWatchlist): Promise<WatchlistItem>;
+  updateWatchlistItem(id: number, data: Partial<InsertWatchlist>): Promise<WatchlistItem | undefined>;
+  deleteWatchlistItem(id: number): Promise<void>;
+
+  // Milestones
+  getAllMilestones(): Promise<Milestone[]>;
+  createMilestone(data: InsertMilestone): Promise<Milestone>;
+  updateMilestone(id: number, data: Partial<InsertMilestone>): Promise<Milestone | undefined>;
+  deleteMilestone(id: number): Promise<void>;
+
+  // Dividends
+  getAllDividends(): Promise<DividendLog[]>;
+  getDividendsByTicker(ticker: string): Promise<DividendLog[]>;
+  createDividend(data: InsertDividendLog): Promise<DividendLog>;
+  deleteDividend(id: number): Promise<void>;
+
+  // Transactions
+  getAllTransactions(): Promise<Transaction[]>;
+  getTransactionsByTicker(ticker: string): Promise<Transaction[]>;
+  createTransaction(data: InsertTransaction): Promise<Transaction>;
+  deleteTransaction(id: number): Promise<void>;
+
+  // Scenario runs
+  saveScenarioRun(data: InsertScenarioRun): Promise<ScenarioRun>;
+  getScenarioHistory(scenarioId: string): Promise<ScenarioRun[]>;
 }
 
 // ── Implementation ────────────────────────────────────────────────────────────
@@ -606,6 +747,142 @@ export class DatabaseStorage implements IStorage {
     await exec(
       "UPDATE price_alerts SET triggered = 1, triggered_at = ? WHERE id = ?",
       [triggeredAt, id],
+    );
+  }
+
+  // ── Watchlist ─────────────────────────────────────────────────────────────
+
+  async getAllWatchlist(): Promise<WatchlistItem[]> {
+    return query("SELECT * FROM watchlist ORDER BY id", [], toWatchlistItem);
+  }
+
+  async addToWatchlist(d: InsertWatchlist): Promise<WatchlistItem> {
+    const r = await db.execute({
+      sql: `INSERT INTO watchlist (ticker, buy_below, notes, sector, created_at)
+            VALUES (?, ?, ?, ?, ?) RETURNING *`,
+      args: [d.ticker, d.buy_below ?? null, d.notes ?? "", d.sector ?? "", d.created_at],
+    });
+    return toWatchlistItem(rowToObj(r.columns, r.rows[0] as any[]));
+  }
+
+  async updateWatchlistItem(id: number, d: Partial<InsertWatchlist>): Promise<WatchlistItem | undefined> {
+    const existing = await queryOne("SELECT * FROM watchlist WHERE id = ?", [id], toWatchlistItem);
+    if (!existing) return undefined;
+    const merged = { ...existing, ...d };
+    const r = await db.execute({
+      sql: `UPDATE watchlist SET ticker=?, buy_below=?, notes=?, sector=?
+            WHERE id=? RETURNING *`,
+      args: [merged.ticker, merged.buy_below ?? null, merged.notes, merged.sector, id],
+    });
+    return toWatchlistItem(rowToObj(r.columns, r.rows[0] as any[]));
+  }
+
+  async deleteWatchlistItem(id: number): Promise<void> {
+    await exec("DELETE FROM watchlist WHERE id = ?", [id]);
+  }
+
+  // ── Milestones ────────────────────────────────────────────────────────────
+
+  async getAllMilestones(): Promise<Milestone[]> {
+    return query("SELECT * FROM milestones ORDER BY id", [], toMilestone);
+  }
+
+  async createMilestone(d: InsertMilestone): Promise<Milestone> {
+    const r = await db.execute({
+      sql: `INSERT INTO milestones (label, target_value, target_date, notes, achieved, achieved_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+      args: [
+        d.label, d.target_value, d.target_date ?? null,
+        d.notes ?? "", d.achieved ? 1 : 0, d.achieved_at ?? null, d.created_at,
+      ],
+    });
+    return toMilestone(rowToObj(r.columns, r.rows[0] as any[]));
+  }
+
+  async updateMilestone(id: number, d: Partial<InsertMilestone>): Promise<Milestone | undefined> {
+    const existing = await queryOne("SELECT * FROM milestones WHERE id = ?", [id], toMilestone);
+    if (!existing) return undefined;
+    const merged = { ...existing, ...d };
+    const r = await db.execute({
+      sql: `UPDATE milestones SET label=?, target_value=?, target_date=?, notes=?, achieved=?, achieved_at=?
+            WHERE id=? RETURNING *`,
+      args: [
+        merged.label, merged.target_value, merged.target_date ?? null,
+        merged.notes, merged.achieved ? 1 : 0, merged.achieved_at ?? null, id,
+      ],
+    });
+    return toMilestone(rowToObj(r.columns, r.rows[0] as any[]));
+  }
+
+  async deleteMilestone(id: number): Promise<void> {
+    await exec("DELETE FROM milestones WHERE id = ?", [id]);
+  }
+
+  // ── Dividends Log ─────────────────────────────────────────────────────────
+
+  async getAllDividends(): Promise<DividendLog[]> {
+    return query("SELECT * FROM dividends_log ORDER BY received_date DESC", [], toDividendLog);
+  }
+
+  async getDividendsByTicker(ticker: string): Promise<DividendLog[]> {
+    return query("SELECT * FROM dividends_log WHERE ticker = ? ORDER BY received_date DESC", [ticker], toDividendLog);
+  }
+
+  async createDividend(d: InsertDividendLog): Promise<DividendLog> {
+    const r = await db.execute({
+      sql: `INSERT INTO dividends_log (ticker, amount_usd, received_date, notes, created_at)
+            VALUES (?, ?, ?, ?, ?) RETURNING *`,
+      args: [d.ticker, d.amount_usd, d.received_date, d.notes ?? "", d.created_at],
+    });
+    return toDividendLog(rowToObj(r.columns, r.rows[0] as any[]));
+  }
+
+  async deleteDividend(id: number): Promise<void> {
+    await exec("DELETE FROM dividends_log WHERE id = ?", [id]);
+  }
+
+  // ── Transactions ──────────────────────────────────────────────────────────
+
+  async getAllTransactions(): Promise<Transaction[]> {
+    return query("SELECT * FROM transactions ORDER BY tx_date DESC", [], toTransaction);
+  }
+
+  async getTransactionsByTicker(ticker: string): Promise<Transaction[]> {
+    return query("SELECT * FROM transactions WHERE ticker = ? ORDER BY tx_date DESC", [ticker], toTransaction);
+  }
+
+  async createTransaction(d: InsertTransaction): Promise<Transaction> {
+    const r = await db.execute({
+      sql: `INSERT INTO transactions (ticker, action, shares, price_usd, amount_usd, tx_date, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+      args: [
+        d.ticker, d.action ?? "buy", d.shares, d.price_usd,
+        d.amount_usd, d.tx_date, d.notes ?? "", d.created_at,
+      ],
+    });
+    return toTransaction(rowToObj(r.columns, r.rows[0] as any[]));
+  }
+
+  async deleteTransaction(id: number): Promise<void> {
+    await exec("DELETE FROM transactions WHERE id = ?", [id]);
+  }
+
+  // ── Scenario Runs ─────────────────────────────────────────────────────────
+
+  async saveScenarioRun(d: InsertScenarioRun): Promise<ScenarioRun> {
+    const r = await db.execute({
+      sql: `INSERT INTO scenario_runs (scenario_id, severity, result_json, run_at)
+            VALUES (?, ?, ?, ?) RETURNING *`,
+      args: [d.scenario_id, d.severity, d.result_json, d.run_at],
+    });
+    return toScenarioRun(rowToObj(r.columns, r.rows[0] as any[]));
+  }
+
+  async getScenarioHistory(scenarioId: string): Promise<ScenarioRun[]> {
+    return query(
+      "SELECT * FROM scenario_runs WHERE scenario_id = ? ORDER BY run_at DESC",
+      [scenarioId],
+      toScenarioRun,
     );
   }
 }

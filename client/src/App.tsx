@@ -17,6 +17,12 @@ import ToolsPosition from "@/pages/tools-position";
 import ToolsCostBasis from "@/pages/tools-costbasis";
 import ToolsExport from "@/pages/tools-export";
 import ToolsImport from "@/pages/tools-import";
+import EducationPage from "@/pages/education";
+import ScenarioStudio from "@/pages/scenario-studio";
+import MilestonesPage from "@/pages/milestones";
+import DividendsPage from "@/pages/dividends";
+import WatchlistPage from "@/pages/watchlist-page";
+import BuyEnginePage from "@/pages/buy-engine";
 import { CurrencyProvider, useCurrency } from "@/contexts/CurrencyContext";
 import {
   LayoutGrid,
@@ -25,6 +31,7 @@ import {
   Brain,
   Bell,
   Wrench,
+  BookOpen,
 } from "lucide-react";
 
 // ─── Navigation config ────────────────────────────────────────────────────────
@@ -36,6 +43,7 @@ const TABS = [
   { path: "/thesis", label: "Thesis", icon: Brain },
   { path: "/alerts", label: "Alerts", icon: Bell },
   { path: "/tools", label: "Tools", icon: Wrench },
+  { path: "/education", label: "Education", icon: BookOpen },
 ];
 
 // ─── Currency Toggle Pill ─────────────────────────────────────────────────────
@@ -135,7 +143,7 @@ function BottomNav() {
       style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
     >
       <div className="flex items-stretch">
-        {TABS.map((tab) => {
+        {TABS.filter((t) => t.path !== "/education").map((tab) => {
           const isActive =
             tab.path === "/"
               ? location === "/"
@@ -250,8 +258,26 @@ function AppRouter() {
       <Route path="/tools/import">
         {() => <Shell><ToolsImport /></Shell>}
       </Route>
+      <Route path="/tools/scenarios">
+        {() => <Shell><ScenarioStudio /></Shell>}
+      </Route>
+      <Route path="/tools/milestones">
+        {() => <Shell><MilestonesPage /></Shell>}
+      </Route>
+      <Route path="/tools/dividends">
+        {() => <Shell><DividendsPage /></Shell>}
+      </Route>
+      <Route path="/tools/watchlist">
+        {() => <Shell><WatchlistPage /></Shell>}
+      </Route>
+      <Route path="/tools/buy-engine">
+        {() => <Shell><BuyEnginePage /></Shell>}
+      </Route>
       <Route path="/tools">
         {() => <Shell><ToolsHub /></Shell>}
+      </Route>
+      <Route path="/education">
+        {() => <Shell><EducationPage /></Shell>}
       </Route>
       <Route component={NotFound} />
     </Switch>

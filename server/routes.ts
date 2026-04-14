@@ -7,6 +7,7 @@ import type { WmbtItem } from "@shared/schema";
 import https from "https";
 import Groq from "groq-sdk";
 import crypto from "crypto";
+import { SCENARIO_LIBRARY, getScenario } from "@shared/scenarios";
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 
@@ -2188,6 +2189,278 @@ Rules:
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Apply failed" });
     }
+  });
+
+  // ── Scenario Library ──────────────────────────────────────────────────────────────
+
+  // GET /api/scenarios/library
+  app.get("/api/scenarios/library", (_req, res) => {
+    const list = SCENARIO_LIBRARY.map((s: any) => ({
+      id: s.id, wave: s.wave, type: s.type, name: s.name, tagline: s.tagline,
+      narrative: s.narrative, source: s.source, source_date: s.source_date,
+      confidence: s.confidence, horizon_label: s.horizon_label,
+      watch_list: s.watch_list, education_note: s.education_note,
+    }));
+    res.json(list);
+  });
+
+  // POST /api/scenarios/run
+  app.post("/api/scenarios/run", async (req, res) => {
+    try {
+      const { scenario_id, severity = "medium", portfolio_value_usd } = req.body;
+      const scenario = getScenario(scenario_id);
+      if (!scenario) return res.status(404).json({ error: "Scenario not found" });
+
+      const holdings = await storage.getAllHoldings();
+      const enrichments = await storage.getAllEnrichments();
+      const enrichMap = new Map(enrichments.map((e: any) => [e.ticker, e]));
+
+      const shocks = scenario.shocks[severity as "low" | "medium" | "high"];
+
+      // Total portfolio value passed from frontend (includes live prices)
+      // Fallback: cost basis sum
+      let totalValue = portfolio_value_usd || holdings.reduce((s: number, h: any) => s + h.shares * h.avg_cost, 0);
+
+      // ── Per-holding impact ──
+      const holdingResults: any[] = holdings.map((h: any) => {
+        const e = enrichMap.get(h.ticker);
+        const currentValue = portfolio_value_usd
+          ? 0  // will be overridden by frontend which knows live prices
+          : h.shares * h.avg_cost;
+
+        // Classify shock to apply
+        const sector = (h.sector || "").toLowerCase();
+        const industry = (e?.industry || "").toLowerCase();
+        const isTech = sector.includes("tech") || industry.includes("software") ||
+          industry.includes("semiconductor") || ["AAPL","MSFT","GOOGL","META","NVDA","AMD","TSLA"].includes(h.ticker);
+        const isEU = false; // assume US-listed unless user tags
+        const isEnergy = sector.includes("energy") || industry.includes("oil") || industry.includes("gas");
+
+        let equityShock = shocks.equity_us ?? 0;
+        if (isTech && shocks.equity_tech != null) equityShock = shocks.equity_tech;
+        else if (isEU && shocks.equity_eu != null) equityShock = shocks.equity_eu;
+
+        // Beta-adjusted equity shock (if beta available, use it; else default 1.0)
+        const beta = e?.beta ?? 1.0;
+        const betaAdjustedShock = equityShock * Math.min(beta, 2.5);
+
+        // Commodity overlay for energy stocks: benefit from oil spike, hurt by oil drop
+        let commodityOverlay = 0;
+        if (isEnergy && shocks.oil_pct != null) {
+          // Energy stocks loosely track oil with ~0.6 sensitivity
+          commodityOverlay = shocks.oil_pct * 0.6;
+        }
+
+        const netShock = betaAdjustedShock + commodityOverlay;
+        const holdingValue = h.shares * h.avg_cost; // cost basis as proxy
+        const impactUsd = holdingValue * netShock;
+
+        return {
+          ticker: h.ticker,
+          bdd_type: h.bdd_type,
+          sector: h.sector,
+          beta: beta,
+          equity_shock_pct: Math.round(netShock * 1000) / 10,
+          holding_cost_value: Math.round(holdingValue * 100) / 100,
+          impact_usd: Math.round(impactUsd * 100) / 100,
+          notes: `Beta ${beta.toFixed(2)} × equity shock ${(equityShock*100).toFixed(1)}%`,
+        };
+      });
+
+      // Total impact
+      const totalImpactUsd = holdingResults.reduce((s: number, h: any) => s + h.impact_usd, 0);
+      const totalCostBasis = holdings.reduce((s: number, h: any) => s + h.shares * h.avg_cost, 0);
+
+      // BDD sleeve breakdown
+      const sleeveImpact: Record<string, { count: number; impact: number; value: number }> = {};
+      for (const hr of holdingResults) {
+        const key = hr.bdd_type || "engine";
+        if (!sleeveImpact[key]) sleeveImpact[key] = { count: 0, impact: 0, value: 0 };
+        sleeveImpact[key].count++;
+        sleeveImpact[key].impact += hr.impact_usd;
+        sleeveImpact[key].value += hr.holding_cost_value;
+      }
+
+      // Top 5 contributors (largest absolute loss)
+      const top5 = [...holdingResults]
+        .sort((a: any, b: any) => a.impact_usd - b.impact_usd)
+        .slice(0, 5);
+
+      // Income impact (from dividend cut if applicable)
+      const dividendCutPct = shocks.dividend_cut_pct ?? 0;
+      const totalDividendYield = enrichments.reduce((s: number, e: any) => {
+        const h = holdings.find((h: any) => h.ticker === e.ticker);
+        if (!h) return s;
+        const holdingVal = h.shares * h.avg_cost;
+        const annualDiv = holdingVal * ((e.dividend_yield ?? 0) / 100);
+        return s + annualDiv;
+      }, 0);
+      const projectedDivIncome = totalDividendYield;
+      const stressedDivIncome = projectedDivIncome * (1 + dividendCutPct);
+      const incomeImpact = stressedDivIncome - projectedDivIncome;
+
+      const result = {
+        scenario_id,
+        scenario_name: scenario.name,
+        severity,
+        total_cost_basis: Math.round(totalCostBasis * 100) / 100,
+        total_impact_usd: Math.round(totalImpactUsd * 100) / 100,
+        total_impact_pct: totalCostBasis > 0 ? Math.round((totalImpactUsd / totalCostBasis) * 1000) / 10 : 0,
+        stressed_value: Math.round((totalCostBasis + totalImpactUsd) * 100) / 100,
+        sleeve_impact: Object.entries(sleeveImpact).map(([type, data]) => ({
+          type,
+          impact_usd: Math.round((data as any).impact * 100) / 100,
+          impact_pct: (data as any).value > 0 ? Math.round(((data as any).impact / (data as any).value) * 1000) / 10 : 0,
+          holding_count: (data as any).count,
+        })),
+        top_5_contributors: top5,
+        income_impact: {
+          projected_annual_div: Math.round(projectedDivIncome * 100) / 100,
+          stressed_annual_div: Math.round(stressedDivIncome * 100) / 100,
+          income_change_usd: Math.round(incomeImpact * 100) / 100,
+          income_change_pct: Math.round(dividendCutPct * 1000) / 10,
+        },
+        shocks_applied: shocks,
+        watch_list: scenario.watch_list,
+        education_note: scenario.education_note,
+        run_at: new Date().toISOString(),
+      };
+
+      // Save to history
+      await storage.saveScenarioRun({
+        scenario_id,
+        severity,
+        result_json: JSON.stringify(result),
+        run_at: result.run_at,
+      });
+
+      res.json(result);
+    } catch (err: any) {
+      console.error("Scenario run error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /api/scenarios/history/:scenario_id
+  app.get("/api/scenarios/history/:scenario_id", async (req, res) => {
+    try {
+      const { scenario_id } = req.params;
+      const history = await storage.getScenarioHistory(scenario_id);
+      res.json(history.map((r: any) => ({
+        id: r.id, scenario_id: r.scenario_id, severity: r.severity,
+        run_at: r.run_at,
+        summary: (() => {
+          try { const p = JSON.parse(r.result_json); return { total_impact_pct: p.total_impact_pct, stressed_value: p.stressed_value }; }
+          catch { return {}; }
+        })(),
+      })));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Watchlist ──────────────────────────────────────────────────────────────
+
+  app.get("/api/watchlist", async (_req, res) => {
+    try { res.json(await storage.getAllWatchlist()); }
+    catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post("/api/watchlist", async (req, res) => {
+    try {
+      const data = { ...req.body, created_at: new Date().toISOString() };
+      const item = await storage.addToWatchlist(data);
+      res.json(item);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.patch("/api/watchlist/:id", async (req, res) => {
+    try {
+      const updated = await storage.updateWatchlistItem(Number(req.params.id), req.body);
+      if (!updated) return res.status(404).json({ error: "Not found" });
+      res.json(updated);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.delete("/api/watchlist/:id", async (req, res) => {
+    try {
+      await storage.deleteWatchlistItem(Number(req.params.id));
+      res.json({ ok: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // ── Milestones ─────────────────────────────────────────────────────────────
+
+  app.get("/api/milestones", async (_req, res) => {
+    try { res.json(await storage.getAllMilestones()); }
+    catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post("/api/milestones", async (req, res) => {
+    try {
+      const data = { ...req.body, created_at: new Date().toISOString() };
+      const item = await storage.createMilestone(data);
+      res.json(item);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.patch("/api/milestones/:id", async (req, res) => {
+    try {
+      const updated = await storage.updateMilestone(Number(req.params.id), req.body);
+      if (!updated) return res.status(404).json({ error: "Not found" });
+      res.json(updated);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.delete("/api/milestones/:id", async (req, res) => {
+    try {
+      await storage.deleteMilestone(Number(req.params.id));
+      res.json({ ok: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // ── Dividends Log ──────────────────────────────────────────────────────────
+
+  app.get("/api/dividends", async (_req, res) => {
+    try { res.json(await storage.getAllDividends()); }
+    catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post("/api/dividends", async (req, res) => {
+    try {
+      const data = { ...req.body, created_at: new Date().toISOString() };
+      const item = await storage.createDividend(data);
+      res.json(item);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.delete("/api/dividends/:id", async (req, res) => {
+    try {
+      await storage.deleteDividend(Number(req.params.id));
+      res.json({ ok: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // ── Transactions ─────────────────────────────────────────────────────────────
+
+  app.get("/api/transactions", async (_req, res) => {
+    try { res.json(await storage.getAllTransactions()); }
+    catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post("/api/transactions", async (req, res) => {
+    try {
+      const data = { ...req.body, created_at: new Date().toISOString() };
+      const item = await storage.createTransaction(data);
+      res.json(item);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.delete("/api/transactions/:id", async (req, res) => {
+    try {
+      await storage.deleteTransaction(Number(req.params.id));
+      res.json({ ok: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
   return httpServer;

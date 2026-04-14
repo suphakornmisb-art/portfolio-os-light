@@ -107,6 +107,74 @@ export const price_alerts = sqliteTable("price_alerts", {
   created_at: text("created_at").notNull(),
 });
 
+export const watchlist = sqliteTable("watchlist", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  ticker: text("ticker").notNull(),
+  buy_below: real("buy_below"),
+  notes: text("notes").notNull().default(""),
+  sector: text("sector").notNull().default(""),
+  created_at: text("created_at").notNull(),
+});
+
+export const milestones = sqliteTable("milestones", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  label: text("label").notNull(),
+  target_value: real("target_value").notNull(),
+  target_date: text("target_date"),
+  notes: text("notes").notNull().default(""),
+  achieved: integer("achieved", { mode: "boolean" }).notNull().default(false),
+  achieved_at: text("achieved_at"),
+  created_at: text("created_at").notNull(),
+});
+
+export const dividends_log = sqliteTable("dividends_log", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  ticker: text("ticker").notNull(),
+  amount_usd: real("amount_usd").notNull(),
+  received_date: text("received_date").notNull(),
+  notes: text("notes").notNull().default(""),
+  created_at: text("created_at").notNull(),
+});
+
+export const transactions = sqliteTable("transactions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  ticker: text("ticker").notNull(),
+  action: text("action").notNull().default("buy"),
+  shares: real("shares").notNull(),
+  price_usd: real("price_usd").notNull(),
+  amount_usd: real("amount_usd").notNull(),
+  tx_date: text("tx_date").notNull(),
+  notes: text("notes").notNull().default(""),
+  created_at: text("created_at").notNull(),
+});
+
+export const scenario_runs = sqliteTable("scenario_runs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  scenario_id: text("scenario_id").notNull(),
+  severity: text("severity").notNull(),
+  result_json: text("result_json").notNull(),
+  run_at: text("run_at").notNull(),
+});
+
+// Insert schemas
+export const insertWatchlistSchema = createInsertSchema(watchlist).omit({ id: true });
+export const insertMilestoneSchema = createInsertSchema(milestones).omit({ id: true });
+export const insertDividendLogSchema = createInsertSchema(dividends_log).omit({ id: true });
+export const insertTransactionSchema = createInsertSchema(transactions).omit({ id: true });
+export const insertScenarioRunSchema = createInsertSchema(scenario_runs).omit({ id: true });
+
+// Types
+export type InsertWatchlist = z.infer<typeof insertWatchlistSchema>;
+export type WatchlistItem = typeof watchlist.$inferSelect;
+export type InsertMilestone = z.infer<typeof insertMilestoneSchema>;
+export type Milestone = typeof milestones.$inferSelect;
+export type InsertDividendLog = z.infer<typeof insertDividendLogSchema>;
+export type DividendLog = typeof dividends_log.$inferSelect;
+export type InsertTransaction = z.infer<typeof insertTransactionSchema>;
+export type Transaction = typeof transactions.$inferSelect;
+export type InsertScenarioRun = z.infer<typeof insertScenarioRunSchema>;
+export type ScenarioRun = typeof scenario_runs.$inferSelect;
+
 export const insertHoldingSchema = createInsertSchema(holdings).omit({ id: true });
 export const insertEnrichmentSchema = createInsertSchema(enrichments).omit({ id: true });
 export const insertSnapshotSchema = createInsertSchema(snapshots).omit({ id: true });

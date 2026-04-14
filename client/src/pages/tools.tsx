@@ -1,7 +1,39 @@
 import { Link } from "wouter";
-import { DollarSign, Target, TrendingDown, Download, Camera, ArrowRight, Wrench } from "lucide-react";
+import { DollarSign, Target, TrendingDown, Download, Camera, ArrowRight, Wrench, FlaskConical, Bot, Eye, Coins } from "lucide-react";
 
 const TOOLS = [
+  {
+    path: "/tools/buy-engine",
+    icon: Bot,
+    title: "Buy Decision Engine",
+    description: "Deterministic per-holding score: Strong Buy / Buy / Hold / Review / Reduce",
+    color: "text-emerald-400",
+    bg: "bg-emerald-500/10",
+  },
+  {
+    path: "/tools/milestones",
+    icon: Target,
+    title: "Milestones & Wealth Path",
+    description: "Track your journey: 2M → 3M → 5M → 10M THB wealth targets",
+    color: "text-blue-400",
+    bg: "bg-blue-500/10",
+  },
+  {
+    path: "/tools/dividends",
+    icon: Coins,
+    title: "Dividend & Income Ledger",
+    description: "Log dividends, track yield-on-cost, project annual income",
+    color: "text-amber-400",
+    bg: "bg-amber-500/10",
+  },
+  {
+    path: "/tools/watchlist",
+    icon: Eye,
+    title: "Watchlist",
+    description: "Track stocks you're watching with buy-below price targets",
+    color: "text-purple-400",
+    bg: "bg-purple-500/10",
+  },
   {
     path: "/tools/capital",
     icon: DollarSign,
@@ -41,6 +73,14 @@ const TOOLS = [
     description: "Upload Dime! screenshots to import or sync your portfolio holdings",
     color: "text-cyan-400",
     bg: "bg-cyan-500/10",
+  },
+  {
+    path: "/tools/scenarios",
+    icon: FlaskConical,
+    title: "Scenario Studio",
+    description: "Stress-test your portfolio against 26 regulatory and historical scenarios (Fed, BoE, EBA, MSCI)",
+    color: "text-red-400",
+    bg: "bg-red-500/10",
   },
 ];
 
