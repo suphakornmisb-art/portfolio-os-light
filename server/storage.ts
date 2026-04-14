@@ -16,8 +16,59 @@ const DB_PATH = process.env.DB_PATH || (process.env.NODE_ENV === "production" ? 
 const sqlite = new Database(DB_PATH);
 try { sqlite.pragma("journal_mode = WAL"); } catch (e) { /* WAL not supported on this fs */ }
 
-// Create tables if they don't exist
+// Create ALL tables if they don't exist
 sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS holdings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL UNIQUE,
+    shares REAL NOT NULL,
+    avg_cost REAL NOT NULL,
+    bdd_type TEXT NOT NULL,
+    sector TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT ''
+  );
+  CREATE TABLE IF NOT EXISTS enrichments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL UNIQUE,
+    company_name TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    sector TEXT NOT NULL DEFAULT '',
+    industry TEXT NOT NULL DEFAULT '',
+    market_cap REAL,
+    pe_ratio REAL,
+    pb_ratio REAL,
+    ps_ratio REAL,
+    pfcf_ratio REAL,
+    ev_ebitda REAL,
+    roic REAL,
+    roe REAL,
+    gross_margin REAL,
+    operating_margin REAL,
+    net_margin REAL,
+    revenue_growth REAL,
+    eps_ttm REAL,
+    fcf_per_share REAL,
+    beta REAL,
+    dividend_yield REAL,
+    payout_ratio REAL,
+    debt_to_equity REAL,
+    current_ratio REAL,
+    fetched_at TEXT NOT NULL DEFAULT ''
+  );
+  CREATE TABLE IF NOT EXISTS snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    total_value REAL NOT NULL,
+    cash_flow REAL NOT NULL DEFAULT 0,
+    holdings_json TEXT NOT NULL DEFAULT '[]'
+  );
+  CREATE TABLE IF NOT EXISTS relationship_graphs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    generated_at TEXT NOT NULL,
+    nodes_json TEXT NOT NULL DEFAULT '[]',
+    edges_json TEXT NOT NULL DEFAULT '[]',
+    summary TEXT NOT NULL DEFAULT ''
+  );
   CREATE TABLE IF NOT EXISTS theses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker TEXT NOT NULL UNIQUE,

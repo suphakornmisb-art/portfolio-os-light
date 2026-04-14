@@ -2,48 +2,6 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
-import { storage } from "./storage";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-async function seedIfEmpty() {
-  try {
-    const existing = await storage.getAllHoldings();
-    if (existing.length > 0) return;
-
-    // Find seed.csv relative to project root
-    const csvPaths = [
-      path.join(__dirname, "../seed.csv"),
-      path.join(process.cwd(), "seed.csv"),
-      "/app/seed.csv",
-    ];
-
-    let csvPath = csvPaths.find(p => fs.existsSync(p));
-    if (!csvPath) { console.log("No seed.csv found, skipping seed"); return; }
-
-    const lines = fs.readFileSync(csvPath, "utf-8").trim().split("\n").slice(1);
-    for (const line of lines) {
-      const [ticker, shares, avg_cost, bdd_type, sector, ...notesParts] = line.split(",");
-      if (!ticker) continue;
-      const notes = notesParts.join(",").replace(/^"|"$/g, "");
-      await storage.createHolding({
-        ticker: ticker.trim(),
-        shares: parseFloat(shares),
-        avg_cost: parseFloat(avg_cost),
-        bdd_type: bdd_type.trim() as any,
-        sector: sector.trim(),
-        notes: notes.trim(),
-      });
-    }
-    console.log(`Seeded ${lines.length} holdings from CSV`);
-  } catch (e) {
-    console.error("Seed error:", e);
-  }
-}
-
 const app = express();
 const httpServer = createServer(app);
 
@@ -101,7 +59,6 @@ app.use((req, res, next) => {
 });
 
 (async () => {
-  await seedIfEmpty();
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
