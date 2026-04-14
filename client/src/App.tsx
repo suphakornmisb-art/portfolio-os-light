@@ -23,6 +23,12 @@ import MilestonesPage from "@/pages/milestones";
 import DividendsPage from "@/pages/dividends";
 import WatchlistPage from "@/pages/watchlist-page";
 import BuyEnginePage from "@/pages/buy-engine";
+import DrawdownTesterPage from "@/pages/drawdown-tester";
+import FxTrackerPage from "@/pages/fx-tracker";
+import AttributionPage from "@/pages/attribution";
+import ConcentrationRiskPage from "@/pages/concentration-risk";
+import HeatmapPage from "@/pages/heatmap";
+import StockDetailPage from "@/pages/stock-detail";
 import { CurrencyProvider, useCurrency } from "@/contexts/CurrencyContext";
 import {
   LayoutGrid,
@@ -273,11 +279,29 @@ function AppRouter() {
       <Route path="/tools/buy-engine">
         {() => <Shell><BuyEnginePage /></Shell>}
       </Route>
+      <Route path="/tools/fx">
+        {() => <Shell><FxTrackerPage /></Shell>}
+      </Route>
+      <Route path="/tools/attribution">
+        {() => <Shell><AttributionPage /></Shell>}
+      </Route>
+      <Route path="/tools/concentration">
+        {() => <Shell><ConcentrationRiskPage /></Shell>}
+      </Route>
+      <Route path="/tools/heatmap">
+        {() => <Shell><HeatmapPage /></Shell>}
+      </Route>
+      <Route path="/tools/drawdown">
+        {() => <Shell><DrawdownTesterPage /></Shell>}
+      </Route>
       <Route path="/tools">
         {() => <Shell><ToolsHub /></Shell>}
       </Route>
       <Route path="/education">
         {() => <Shell><EducationPage /></Shell>}
+      </Route>
+      <Route path="/stock/:ticker">
+        {() => <Shell><StockDetailPage /></Shell>}
       </Route>
       <Route component={NotFound} />
     </Switch>

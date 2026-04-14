@@ -3,6 +3,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Pencil, Trash2, Search } from "lucide-react";
 import { fmtPct, fmtShares, pnlColor, BDD_COLORS, bddLabel } from "./format";
 import { useCurrency } from "@/contexts/CurrencyContext";
+import { Link } from "wouter";
 import type { Holding } from "@shared/schema";
 
 interface EnrichedHolding extends Holding {
@@ -126,7 +127,12 @@ export function HoldingsTable({
                   data-testid={`row-holding-${h.id}`}
                 >
                   <td className="p-2.5 pl-3.5">
-                    <div className="font-mono font-semibold text-foreground">{h.ticker}</div>
+                    <Link
+                      href={`/stock/${h.ticker}`}
+                      className="font-mono font-semibold text-primary hover:underline cursor-pointer"
+                    >
+                      {h.ticker}
+                    </Link>
                     <div className="text-[10px] text-muted-foreground truncate max-w-[140px]">
                       {h.sector}
                     </div>
@@ -225,7 +231,12 @@ export function HoldingsTable({
             <div key={h.id} className="p-3 space-y-2" data-testid={`card-holding-${h.id}`}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-mono font-semibold text-sm">{h.ticker}</span>
+                  <Link
+                    href={`/stock/${h.ticker}`}
+                    className="font-mono font-semibold text-sm text-primary hover:underline cursor-pointer"
+                  >
+                    {h.ticker}
+                  </Link>
                   <span
                     className={`text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${colors.bg} ${colors.text}`}
                   >

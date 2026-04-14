@@ -2,6 +2,7 @@ import { useState, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { Link } from "wouter";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -19,6 +20,7 @@ import {
   Plus,
   AlertTriangle,
   Info,
+  ArrowRight,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -53,8 +55,11 @@ interface Transaction {
 
 interface Snapshot {
   id: number;
-  snapshot_date: string;
-  total_value_usd: number;
+  date: string;
+  total_value: number;
+  total_cost: number;
+  deposits?: number;
+  withdrawals?: number;
 }
 
 // ─── Static Data ─────────────────────────────────────────────────────────────
@@ -1120,10 +1125,16 @@ function BuyTimingTab({ transactions }: { transactions: Transaction[] }) {
       {buys.length === 0 ? (
         <div className="rounded-lg border border-border bg-card p-8 text-center">
           <Clock className="h-8 w-8 text-muted-foreground mx-auto mb-3" />
-          <p className="text-sm font-medium text-foreground mb-1">No buy transactions logged</p>
-          <p className="text-xs text-muted-foreground">
-            Import your portfolio via the Screenshot Import tool in the Tools tab to log transactions.
+          <p className="text-sm font-medium text-foreground mb-1">No transactions logged yet.</p>
+          <p className="text-xs text-muted-foreground mb-4">
+            Use the Screenshot Import tool to import your Dime! order confirmations — they'll appear here automatically.
           </p>
+          <Link href="/tools/import">
+            <button className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-primary/10 text-primary border border-primary/30 hover:bg-primary/20 transition-colors">
+              Go to Screenshot Import
+              <ArrowRight className="h-3 w-3" />
+            </button>
+          </Link>
         </div>
       ) : (
         <>
@@ -1194,17 +1205,29 @@ function BuyTimingTab({ transactions }: { transactions: Transaction[] }) {
 
 // ─── Tab 7: Benchmarks ────────────────────────────────────────────────────────
 
+function computePortfolioReturn(snapshots: Snapshot[]): {
+  allTime: number | null;
+  period: string;
+  hasEnoughData: boolean;
+} {
+  if (snapshots.length < 2) return { allTime: null, period: "N/A", hasEnoughData: false };
+  const sorted = [...snapshots].sort((a, b) => a.date.localeCompare(b.date));
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  if (!first.total_cost || first.total_cost === 0) return { allTime: null, period: "N/A", hasEnoughData: false };
+  const allTime = ((last.total_value - first.total_cost) / first.total_cost) * 100;
+  const period = `${first.date} → ${last.date}`;
+  return { allTime, period, hasEnoughData: true };
+}
+
 function BenchmarksTab({ snapshots }: { snapshots: Snapshot[] }) {
-  const portfolioReturn1Y = useMemo(() => {
-    if (snapshots.length < 2) return null;
-    const sorted = [...snapshots].sort((a, b) => a.snapshot_date.localeCompare(b.snapshot_date));
-    const latest = sorted[sorted.length - 1];
-    const oneYearAgo = new Date(latest.snapshot_date);
-    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-    const past = sorted.find((s) => new Date(s.snapshot_date) >= oneYearAgo);
-    if (!past || past.id === latest.id) return null;
-    return ((latest.total_value_usd - past.total_value_usd) / past.total_value_usd) * 100;
-  }, [snapshots]);
+  const { allTime: portfolioReturnAllTime, period, hasEnoughData } = useMemo(
+    () => computePortfolioReturn(snapshots),
+    [snapshots],
+  );
+
+  // Use all-time return as the primary portfolio return for alpha calculation
+  const portfolioReturn = portfolioReturnAllTime;
 
   return (
     <div className="space-y-4">
@@ -1224,7 +1247,10 @@ function BenchmarksTab({ snapshots }: { snapshots: Snapshot[] }) {
         <Info className="h-3.5 w-3.5 text-muted-foreground shrink-0 mt-0.5" />
         <p className="text-[10px] text-muted-foreground leading-relaxed">
           Benchmark returns shown are approximate annualized historical averages for educational reference. Your
-          actual performance is shown in the Performance tab.
+          actual performance is computed from your snapshot history.
+          {hasEnoughData && (
+            <span className="text-primary ml-1">Period: {period}</span>
+          )}
         </p>
       </div>
 
@@ -1238,48 +1264,53 @@ function BenchmarksTab({ snapshots }: { snapshots: Snapshot[] }) {
                 <th className="text-right pb-2 text-muted-foreground font-medium">1Y Return</th>
                 <th className="text-right pb-2 text-muted-foreground font-medium">3Y Ann.</th>
                 <th className="text-right pb-2 text-muted-foreground font-medium">5Y Ann.</th>
-                <th className="text-right pb-2 text-muted-foreground font-medium">vs Your Portfolio</th>
+                <th className="text-right pb-2 text-muted-foreground font-medium">Alpha vs Your Portfolio</th>
               </tr>
             </thead>
             <tbody>
-              {BENCHMARKS.map((b) => (
-                <tr key={b.id} className="border-b border-border/40 hover:bg-muted/20">
-                  <td className="py-2 font-medium text-foreground">{b.name}</td>
-                  <td className="py-2 text-right font-mono text-emerald-400">+{b.returns["1Y"]}%</td>
-                  <td className="py-2 text-right font-mono text-foreground">+{b.returns["3Y"]}%</td>
-                  <td className="py-2 text-right font-mono text-foreground">+{b.returns["5Y"]}%</td>
-                  <td className="py-2 text-right font-mono">
-                    {portfolioReturn1Y !== null ? (
-                      <span
-                        className={
-                          portfolioReturn1Y - b.returns["1Y"] >= 0 ? "text-emerald-400" : "text-red-400"
-                        }
-                      >
-                        {fmtPct(portfolioReturn1Y - b.returns["1Y"])} alpha
-                      </span>
-                    ) : (
-                      <span className="text-muted-foreground text-[10px]">—</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {BENCHMARKS.map((b) => {
+                const alpha = hasEnoughData && portfolioReturn !== null
+                  ? portfolioReturn - b.returns["1Y"]
+                  : null;
+                return (
+                  <tr key={b.id} className="border-b border-border/40 hover:bg-muted/20">
+                    <td className="py-2 font-medium text-foreground">{b.name}</td>
+                    <td className="py-2 text-right font-mono text-emerald-400">+{b.returns["1Y"]}%</td>
+                    <td className="py-2 text-right font-mono text-foreground">+{b.returns["3Y"]}%</td>
+                    <td className="py-2 text-right font-mono text-foreground">+{b.returns["5Y"]}%</td>
+                    <td className="py-2 text-right font-mono">
+                      {alpha !== null ? (
+                        <span className={alpha >= 0 ? "text-emerald-400" : "text-red-400"}>
+                          {fmtPct(alpha)} alpha
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground text-[10px]">—</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
 
               {/* Your portfolio row */}
               <tr className="bg-primary/5 border-t-2 border-primary/20">
                 <td className="py-2 font-semibold text-primary">Your Portfolio</td>
                 <td className="py-2 text-right font-mono">
-                  {portfolioReturn1Y !== null ? (
-                    <span className={portfolioReturn1Y >= 0 ? "text-emerald-400" : "text-red-400"}>
-                      {fmtPct(portfolioReturn1Y)}
+                  {hasEnoughData && portfolioReturn !== null ? (
+                    <span className={portfolioReturn >= 0 ? "text-emerald-400" : "text-red-400"}>
+                      {fmtPct(portfolioReturn)}
                     </span>
                   ) : (
-                    <span className="text-muted-foreground text-[10px] italic">See Performance tab</span>
+                    <span className="text-muted-foreground text-[10px] italic">—</span>
                   )}
                 </td>
                 <td className="py-2 text-right font-mono text-muted-foreground text-[10px] italic" colSpan={3}>
-                  {portfolioReturn1Y === null
-                    ? "Add snapshots in Performance tab to see actual returns here"
-                    : "3Y & 5Y require longer snapshot history"}
+                  {!hasEnoughData ? (
+                    <Link href="/performance">
+                      <span className="text-primary hover:underline cursor-pointer">Add snapshots in Performance tab</span>
+                    </Link>
+                  ) : (
+                    `All-time return (${period})`
+                  )}
                 </td>
               </tr>
             </tbody>
@@ -1287,47 +1318,53 @@ function BenchmarksTab({ snapshots }: { snapshots: Snapshot[] }) {
         </div>
       </SectionCard>
 
-      {/* Visual bar comparison for 1Y returns */}
-      <SectionCard title="1-Year Return Comparison" icon={BarChart3}>
-        {[
-          ...BENCHMARKS.map((b) => ({ name: b.name, value: b.returns["1Y"], isPortfolio: false })),
-          ...(portfolioReturn1Y !== null
-            ? [{ name: "Your Portfolio", value: portfolioReturn1Y, isPortfolio: true }]
-            : []),
-        ]
-          .sort((a, b) => b.value - a.value)
-          .map((item) => {
-            const maxVal = Math.max(
-              ...BENCHMARKS.map((b) => b.returns["1Y"]),
-              portfolioReturn1Y ?? 0,
-            );
-            return (
-              <div key={item.name} className="flex items-center gap-2 mb-2">
-                <span
-                  className={`text-[10px] w-36 shrink-0 truncate ${
-                    item.isPortfolio ? "text-primary font-semibold" : "text-muted-foreground"
+      {/* Visual bar comparison */}
+      <SectionCard title="Return Comparison" icon={BarChart3}>
+        {(() => {
+          const items = [
+            ...BENCHMARKS.map((b) => ({ name: b.name, value: b.returns["1Y"], isPortfolio: false })),
+            ...(hasEnoughData && portfolioReturn !== null
+              ? [{ name: "Your Portfolio", value: portfolioReturn, isPortfolio: true }]
+              : []),
+          ].sort((a, b) => b.value - a.value);
+
+          const allValues = items.map((i) => Math.abs(i.value));
+          const maxVal = allValues.length > 0 ? Math.max(...allValues) : 1;
+
+          return items.map((item) => (
+            <div key={item.name} className="flex items-center gap-2 mb-2">
+              <span
+                className={`text-[10px] w-36 shrink-0 truncate ${
+                  item.isPortfolio ? "text-primary font-semibold" : "text-muted-foreground"
+                }`}
+              >
+                {item.name}
+              </span>
+              <div className="flex-1 bg-muted/30 rounded-full h-3 overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all ${
+                    item.isPortfolio ? "bg-amber-500" : "bg-primary/60"
                   }`}
-                >
-                  {item.name}
-                </span>
-                <div className="flex-1 bg-muted/30 rounded-full h-3 overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all ${
-                      item.isPortfolio ? "bg-amber-500" : "bg-primary/60"
-                    }`}
-                    style={{ width: `${(item.value / maxVal) * 100}%` }}
-                  />
-                </div>
-                <span
-                  className={`font-mono text-[10px] w-12 text-right shrink-0 ${
-                    item.isPortfolio ? "text-amber-400" : "text-emerald-400"
-                  }`}
-                >
-                  +{item.value.toFixed(1)}%
-                </span>
+                  style={{ width: `${(Math.abs(item.value) / maxVal) * 100}%` }}
+                />
               </div>
-            );
-          })}
+              <span
+                className={`font-mono text-[10px] w-14 text-right shrink-0 ${
+                  item.isPortfolio
+                    ? item.value >= 0 ? "text-amber-400" : "text-red-400"
+                    : "text-emerald-400"
+                }`}
+              >
+                {item.value >= 0 ? "+" : ""}{item.value.toFixed(1)}%
+              </span>
+            </div>
+          ));
+        })()}
+        {!hasEnoughData && (
+          <p className="text-[10px] text-muted-foreground mt-2">
+            Your portfolio bar will appear once you have 2+ snapshots in the Performance tab.
+          </p>
+        )}
       </SectionCard>
 
       {/* Education cards */}

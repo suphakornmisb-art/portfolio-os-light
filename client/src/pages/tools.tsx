@@ -1,5 +1,5 @@
 import { Link } from "wouter";
-import { DollarSign, Target, TrendingDown, Download, Camera, ArrowRight, Wrench, FlaskConical, Bot, Eye, Coins } from "lucide-react";
+import { DollarSign, Target, TrendingDown, Download, Camera, ArrowRight, Wrench, FlaskConical, Bot, Eye, Coins, Layers, LayoutGrid, ArrowLeftRight, PieChart } from "lucide-react";
 
 const TOOLS = [
   {
@@ -79,6 +79,46 @@ const TOOLS = [
     icon: FlaskConical,
     title: "Scenario Studio",
     description: "Stress-test your portfolio against 26 regulatory and historical scenarios (Fed, BoE, EBA, MSCI)",
+    color: "text-red-400",
+    bg: "bg-red-500/10",
+  },
+  {
+    path: "/tools/concentration",
+    icon: Layers,
+    title: "Concentration Risk",
+    description: "Cross-theme exposure: cloud, AI, fintech, and more across sector labels",
+    color: "text-orange-400",
+    bg: "bg-orange-500/10",
+  },
+  {
+    path: "/tools/heatmap",
+    icon: LayoutGrid,
+    title: "Markets Heatmap",
+    description: "Live sector heatmap with your holdings highlighted by today's performance",
+    color: "text-blue-400",
+    bg: "bg-blue-500/10",
+  },
+  {
+    path: "/tools/fx",
+    icon: ArrowLeftRight,
+    title: "THB FX Tracker",
+    description: "Isolate FX P\u0026L from equity P\u0026L \u2014 see how USD/THB rate changes affect your returns",
+    color: "text-yellow-400",
+    bg: "bg-yellow-500/10",
+  },
+  {
+    path: "/tools/attribution",
+    icon: PieChart,
+    title: "Performance Attribution",
+    description: "Return decomposed by BDD sleeve, sector, and individual stock vs S\u0026P 500",
+    color: "text-indigo-400",
+    bg: "bg-indigo-500/10",
+  },
+  {
+    path: "/tools/drawdown",
+    icon: TrendingDown,
+    title: "Drawdown Stress Tester",
+    description: "Simulate −20% to −50% market drops — beta-adjusted per-holding impact",
     color: "text-red-400",
     bg: "bg-red-500/10",
   },

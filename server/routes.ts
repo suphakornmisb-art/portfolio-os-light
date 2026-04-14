@@ -2441,6 +2441,127 @@ Rules:
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
+  // ── Stock Detail (FMP-powered) ──────────────────────────────────────────────
+  // GET /api/stock/:ticker/detail
+  // Returns: profile, income statement (5yr), key metrics (5yr), ratios (5yr), quote
+  app.get("/api/stock/:ticker/detail", async (req, res) => {
+    try {
+      const ticker = req.params.ticker.toUpperCase();
+      const fmpTicker = toFmpTicker(ticker);
+
+      const [profileData, incomeData, keyMetricsData, ratiosData, cashFlowData, quoteData] = await Promise.all([
+        fetchFmpJson(`profile?symbol=${encodeURIComponent(fmpTicker)}`),
+        fetchFmpJson(`income-statement?symbol=${encodeURIComponent(fmpTicker)}&period=annual&limit=5`),
+        fetchFmpJson(`key-metrics?symbol=${encodeURIComponent(fmpTicker)}&period=annual&limit=5`),
+        fetchFmpJson(`ratios?symbol=${encodeURIComponent(fmpTicker)}&period=annual&limit=5`),
+        fetchFmpJson(`cash-flow-statement?symbol=${encodeURIComponent(fmpTicker)}&period=annual&limit=5`),
+        fetchFmpJson(`quote?symbol=${encodeURIComponent(fmpTicker)}`),
+      ]);
+
+      const profile = Array.isArray(profileData) ? profileData[0] : profileData;
+      const income = Array.isArray(incomeData) ? incomeData : [];
+      const km = Array.isArray(keyMetricsData) ? keyMetricsData : [];
+      const ratios = Array.isArray(ratiosData) ? ratiosData : [];
+      const cashFlow = Array.isArray(cashFlowData) ? cashFlowData : [];
+      const quote = Array.isArray(quoteData) ? quoteData[0] : quoteData;
+
+      // Build 5-year margin trend
+      const marginTrend = income.slice(0, 5).reverse().map((inc: any, i: number) => {
+        const rev = inc.revenue || 1;
+        const cf = cashFlow.find((c: any) => c.calendarYear === inc.calendarYear) || {};
+        const gm = inc.grossProfit != null ? (inc.grossProfit / rev) * 100 : null;
+        const om = inc.operatingIncome != null ? (inc.operatingIncome / rev) * 100 : null;
+        const nm = inc.netIncome != null ? (inc.netIncome / rev) * 100 : null;
+        const fcfm = cf.freeCashFlow != null && rev > 0 ? (cf.freeCashFlow / rev) * 100 : null;
+        return {
+          year: inc.calendarYear || (new Date().getFullYear() - (4 - i)),
+          revenue: inc.revenue,
+          cogs: inc.costOfRevenue,
+          gross_profit: inc.grossProfit,
+          operating_expenses: inc.operatingExpenses,
+          operating_income: inc.operatingIncome,
+          interest_expense: inc.interestExpense,
+          income_tax: inc.incomeTaxExpense,
+          net_income: inc.netIncome,
+          fcf: cf.freeCashFlow,
+          gm, om, nm, fcfm,
+        };
+      });
+
+      // Latest year for profit bridge
+      const latest = income[0] || {};
+      const latestCf = cashFlow[0] || {};
+      const latestKm = km[0] || {};
+      const latestRatios = ratios[0] || {};
+
+      res.json({
+        ticker,
+        profile: {
+          name: profile?.companyName,
+          description: profile?.description,
+          sector: profile?.sector,
+          industry: profile?.industry,
+          website: profile?.website,
+          ceo: profile?.ceo,
+          employees: profile?.fullTimeEmployees,
+          country: profile?.country,
+          exchange: profile?.exchangeShortName,
+          market_cap: profile?.mktCap,
+          beta: profile?.beta,
+          image: profile?.image,
+          ipo_date: profile?.ipoDate,
+          is_etf: profile?.isEtf,
+        },
+        quote: {
+          price: quote?.price,
+          change: quote?.change,
+          changes_pct: quote?.changesPercentage,
+          day_low: quote?.dayLow,
+          day_high: quote?.dayHigh,
+          year_low: quote?.yearLow,
+          year_high: quote?.yearHigh,
+          volume: quote?.volume,
+          avg_volume: quote?.avgVolume,
+          market_cap: quote?.marketCap,
+          pe: quote?.pe,
+          eps: quote?.eps,
+        },
+        profit_bridge: {
+          revenue: latest.revenue,
+          cogs: latest.costOfRevenue,
+          gross_profit: latest.grossProfit,
+          operating_expenses: latest.operatingExpenses,
+          operating_income: latest.operatingIncome,
+          interest_expense: latest.interestExpense,
+          tax: latest.incomeTaxExpense,
+          net_income: latest.netIncome,
+          fcf: latestCf.freeCashFlow,
+          fiscal_year: latest.calendarYear,
+          gm_pct: latest.revenue > 0 && latest.grossProfit != null ? (latest.grossProfit / latest.revenue) * 100 : null,
+          om_pct: latest.revenue > 0 && latest.operatingIncome != null ? (latest.operatingIncome / latest.revenue) * 100 : null,
+          nm_pct: latest.revenue > 0 && latest.netIncome != null ? (latest.netIncome / latest.revenue) * 100 : null,
+          fcf_pct: latest.revenue > 0 && latestCf.freeCashFlow != null ? (latestCf.freeCashFlow / latest.revenue) * 100 : null,
+        },
+        key_ratios: {
+          pe: latestRatios.priceEarningsRatio,
+          pb: latestRatios.priceToBookRatio,
+          ps: latestRatios.priceToSalesRatio,
+          pfcf: latestRatios.priceToFreeCashFlowsRatio,
+          ev_ebitda: latestKm.enterpriseValueOverEBITDA,
+          roic: latestKm.roic != null ? latestKm.roic * 100 : null,
+          roe: latestKm.roe != null ? latestKm.roe * 100 : null,
+          dividend_yield: latestRatios.dividendYield != null ? latestRatios.dividendYield * 100 : null,
+          net_debt_ebitda: latestKm.netDebtToEBITDA,
+          current_ratio: latestRatios.currentRatio,
+        },
+        margin_trend: marginTrend, // 5 years, chronological
+      });
+    } catch (err: any) {
+      console.error("Stock detail error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // ── Transactions ─────────────────────────────────────────────────────────────
 
   app.get("/api/transactions", async (_req, res) => {
