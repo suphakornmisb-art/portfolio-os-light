@@ -76,11 +76,90 @@ async function enrichTicker(ticker: string): Promise<InsertEnrichment> {
   const latestIncome = income[0] || {};
   const latestCashFlow = cashFlow[0] || {};
 
+  // ── Field name mapping for FMP /stable/ endpoint ──
+  // /stable/key-metrics does NOT return freeCashFlowPerShare, bookValuePerShare,
+  // revenuePerShare, enterpriseValueOverEBITDA, roic, or roe.
+  // Correct field names: returnOnInvestedCapital, returnOnEquity, evToEBITDA, netDebtToEBITDA.
+  // Per-share values must be computed from raw financials.
+
+  // Shares outstanding (prefer diluted)
+  const sharesOut = latestIncome.weightedAverageShsOutDil || latestIncome.weightedAverageShsOut || 0;
+
+  // EPS — income statement epsDiluted is most reliable
+  const epsTtm = latestIncome.epsDiluted || latestIncome.eps || 0;
+
+  // FCF per share — compute from cash flow / shares
+  const latestFcf = latestCashFlow.freeCashFlow || 0;
+  const fcfPerShare = sharesOut > 0 ? latestFcf / sharesOut : 0;
+
+  // Revenue per share — compute from income / shares
+  const latestRevenue = latestIncome.revenue || 0;
+  const revenuePerShare = sharesOut > 0 ? latestRevenue / sharesOut : 0;
+
+  // Book value per share — compute from balance sheet equity / shares
+  // FMP key-metrics has tangibleAssetValue; use grahamNumber approach or income net assets
+  // Best proxy: latestKm.tangibleAssetValue / shares (tangible book)
+  const tangibleAssets = latestKm.tangibleAssetValue || 0;
+  const bookValuePerShare = sharesOut > 0 && tangibleAssets > 0 ? tangibleAssets / sharesOut : 0;
+
+  // FCF margin
+  const fcfMargin = latestRevenue > 0 ? (latestFcf / latestRevenue) * 100 : 0;
+
+  // ROIC, ROE — correct field names in /stable/key-metrics
+  const roicRaw = latestKm.returnOnInvestedCapital ?? latestKm.roic ?? null;
+  const roeRaw = latestKm.returnOnEquity ?? latestKm.roe ?? null;
+
+  // EV/EBITDA — correct field name
+  const evEbitda = latestKm.evToEBITDA ?? latestKm.enterpriseValueOverEBITDA ?? null;
+
+  // Net debt / EBITDA
+  const netDebtEbitda = latestKm.netDebtToEBITDA ?? null;
+
   // 5yr median multiples from ratios
-  const pe5y = median(ratios.slice(0, 5).map((r: any) => r.priceEarningsRatio));
+  // priceEarningsRatio and priceToFreeCashFlowsRatio are null in /stable/ratios.
+  // Compute them from price / (eps or fcf/share) per year using income + cashflow data.
+  const currentPrice = profile?.price || 0;
+
+  // Build per-year PE and P/FCF by cross-referencing income + cashflow with ratios
+  const pe5yArr: number[] = [];
+  const pfcf5yArr: number[] = [];
+  for (let i = 0; i < Math.min(5, income.length); i++) {
+    const inc = income[i];
+    const cf = cashFlow.find((c: any) => c.calendarYear === inc.calendarYear) || cashFlow[i] || {};
+    const yr_shares = inc.weightedAverageShsOutDil || inc.weightedAverageShsOut || 0;
+    const yr_eps = inc.epsDiluted || inc.eps || 0;
+    const yr_fcf = cf.freeCashFlow || 0;
+    const yr_fcf_ps = yr_shares > 0 ? yr_fcf / yr_shares : 0;
+    // Use the corresponding ratio year's P/S to back-derive approximate price, or use current price as approximation
+    // For 5yr median we use current ratios where available, else cross-compute
+    const rat = ratios[i] || {};
+    // P/B and P/S are available in ratios
+    if (rat.priceEarningsRatio && rat.priceEarningsRatio > 0) {
+      pe5yArr.push(rat.priceEarningsRatio);
+    } else if (yr_eps > 0 && rat.priceToSalesRatio && latestRevenue > 0) {
+      // approximate: implied_price = P/S * revenue/shares; pe = implied_price / eps
+      const impliedPS = rat.priceToSalesRatio;
+      const rev_ps = yr_shares > 0 ? (inc.revenue || 0) / yr_shares : 0;
+      const impliedPrice = impliedPS * rev_ps;
+      if (impliedPrice > 0 && yr_eps > 0) pe5yArr.push(impliedPrice / yr_eps);
+    }
+    if (rat.priceToFreeCashFlowsRatio && rat.priceToFreeCashFlowsRatio > 0) {
+      pfcf5yArr.push(rat.priceToFreeCashFlowsRatio);
+    } else if (yr_fcf_ps > 0 && rat.priceToSalesRatio && inc.revenue > 0) {
+      const impliedPS = rat.priceToSalesRatio;
+      const rev_ps = yr_shares > 0 ? (inc.revenue || 0) / yr_shares : 0;
+      const impliedPrice = impliedPS * rev_ps;
+      if (impliedPrice > 0 && yr_fcf_ps > 0) pfcf5yArr.push(impliedPrice / yr_fcf_ps);
+    }
+  }
+  // Fallback: compute from current price and latest per-share values
+  if (pe5yArr.length === 0 && epsTtm > 0 && currentPrice > 0) pe5yArr.push(currentPrice / epsTtm);
+  if (pfcf5yArr.length === 0 && fcfPerShare > 0 && currentPrice > 0) pfcf5yArr.push(currentPrice / fcfPerShare);
+
+  const pe5y = median(pe5yArr.length > 0 ? pe5yArr : []);
   const pb5y = median(ratios.slice(0, 5).map((r: any) => r.priceToBookRatio));
   const ps5y = median(ratios.slice(0, 5).map((r: any) => r.priceToSalesRatio));
-  const pfcf5y = median(ratios.slice(0, 5).map((r: any) => r.priceToFreeCashFlowsRatio));
+  const pfcf5y = median(pfcf5yArr.length > 0 ? pfcf5yArr : []);
 
   // Revenue & EPS growth (CAGR over available years up to 5)
   const incomeSlice = income.slice(0, 5);
@@ -91,44 +170,39 @@ async function enrichTicker(ticker: string): Promise<InsertEnrichment> {
     const oldest = incomeSlice[incomeSlice.length - 1];
     const years = incomeSlice.length - 1;
     revenueGrowth5y = cagr(oldest.revenue, newest.revenue, years);
-    if (oldest.eps > 0 && newest.eps > 0) {
-      epsGrowth5y = cagr(oldest.eps, newest.eps, years);
+    const newestEps = newest.epsDiluted || newest.eps || 0;
+    const oldestEps = oldest.epsDiluted || oldest.eps || 0;
+    if (oldestEps > 0 && newestEps > 0) {
+      epsGrowth5y = cagr(oldestEps, newestEps, years);
     }
   }
 
-  // FCF margin
-  const latestRevenue = latestIncome.revenue || 0;
-  const latestFcf = latestCashFlow.freeCashFlow || 0;
-  const fcfMargin = latestRevenue > 0 ? (latestFcf / latestRevenue) * 100 : 0;
-
-  // Per-share figures from key-metrics
-  const fcfPerShare = latestKm.freeCashFlowPerShare || 0;
-  const bookValuePerShare = latestKm.bookValuePerShare || 0;
-  const revenuePerShare = latestKm.revenuePerShare || 0;
+  // Dividend yield — profile.lastDividend (not lastDiv) and profile.price
+  const lastDiv = profile?.lastDividend ?? profile?.lastDiv ?? 0;
+  const divYield = lastDiv > 0 && currentPrice > 0 ? (lastDiv / currentPrice) * 100 : null;
 
   return {
     ticker,
     company_name: profile?.companyName || null,
     industry: profile?.industry || null,
-    market_cap: profile?.mktCap || null,
+    market_cap: profile?.marketCap ?? profile?.mktCap ?? null,
     beta: profile?.beta || null,
-    pe_ratio: latestRatios.priceEarningsRatio || null,
+    pe_ratio: (epsTtm > 0 && currentPrice > 0) ? currentPrice / epsTtm : null,
     pb_ratio: latestRatios.priceToBookRatio || null,
     ps_ratio: latestRatios.priceToSalesRatio || null,
-    pfcf_ratio: latestRatios.priceToFreeCashFlowsRatio || null,
-    ev_ebitda: latestKm.enterpriseValueOverEBITDA || null,
-    roic: latestKm.roic != null ? latestKm.roic * 100 : null,
-    roe: latestKm.roe != null ? latestKm.roe * 100 : null,
+    pfcf_ratio: (fcfPerShare > 0 && currentPrice > 0) ? currentPrice / fcfPerShare : null,
+    ev_ebitda: evEbitda || null,
+    roic: roicRaw != null ? roicRaw * 100 : null,
+    roe: roeRaw != null ? roeRaw * 100 : null,
     gross_margin: latestRatios.grossProfitMargin != null ? latestRatios.grossProfitMargin * 100 : null,
     operating_margin: latestRatios.operatingProfitMargin != null ? latestRatios.operatingProfitMargin * 100 : null,
     net_margin: latestRatios.netProfitMargin != null ? latestRatios.netProfitMargin * 100 : null,
     fcf_margin: fcfMargin || null,
     revenue_growth_5y: revenueGrowth5y || null,
     eps_growth_5y: epsGrowth5y || null,
-    net_debt_ebitda: latestKm.netDebtToEBITDA || null,
-    dividend_yield: profile?.lastDiv != null && profile?.price != null && profile.price > 0
-      ? (profile.lastDiv / profile.price) * 100 : null,
-    eps_ttm: profile?.eps || latestIncome.eps || null,
+    net_debt_ebitda: netDebtEbitda || null,
+    dividend_yield: divYield,
+    eps_ttm: epsTtm || null,
     fcf_per_share: fcfPerShare || null,
     book_value_per_share: bookValuePerShare || null,
     revenue_per_share: revenuePerShare || null,
@@ -1875,7 +1949,7 @@ Return JSON:
         totalMktValue += mktValue;
         sleeveValues[h.bdd_type] = (sleeveValues[h.bdd_type] || 0) + mktValue;
         return { ...h, current_price: price, market_value: mktValue, cost_basis: costBasis,
-          pnl: mktValue - costBasis, day_change_pct: q?.changesPercentage ?? 0 };
+          pnl: mktValue - costBasis, day_change_pct: q?.changePercentage ?? q?.changesPercentage ?? 0 };
       });
 
       const allEnrichments = await storage.getAllEnrichments();
@@ -1937,7 +2011,7 @@ Return JSON:
         const company = enrichMap.get(h.ticker)?.company_name || h.ticker;
         return [
           h.ticker, company, h.shares.toFixed(4), h.avg_cost.toFixed(2), price.toFixed(2),
-          mktValue.toFixed(2), pnl.toFixed(2), pnlPct.toFixed(2), (q?.changesPercentage ?? 0).toFixed(2),
+          mktValue.toFixed(2), pnl.toFixed(2), pnlPct.toFixed(2), (q?.changePercentage ?? q?.changesPercentage ?? 0).toFixed(2),
           h.bdd_type, h.sector, weight.toFixed(2),
         ].map((v) => `"${v}"`).join(",");
       });
@@ -2506,7 +2580,7 @@ Rules:
           employees: profile?.fullTimeEmployees,
           country: profile?.country,
           exchange: profile?.exchangeShortName,
-          market_cap: profile?.mktCap,
+          market_cap: profile?.marketCap ?? profile?.mktCap,
           beta: profile?.beta,
           image: profile?.image,
           ipo_date: profile?.ipoDate,
@@ -2515,16 +2589,25 @@ Rules:
         quote: {
           price: quote?.price,
           change: quote?.change,
-          changes_pct: quote?.changesPercentage,
+          // FMP /stable/quote uses changePercentage (not changesPercentage), avgVolume missing, pe/eps null
+          changes_pct: quote?.changePercentage ?? quote?.changesPercentage ?? null,
           day_low: quote?.dayLow,
           day_high: quote?.dayHigh,
           year_low: quote?.yearLow,
           year_high: quote?.yearHigh,
           volume: quote?.volume,
-          avg_volume: quote?.avgVolume,
+          avg_volume: quote?.avgVolume ?? quote?.priceAvg50 ?? null, // avgVolume not in /stable/quote; use priceAvg50 as fallback or null
           market_cap: quote?.marketCap,
-          pe: quote?.pe,
-          eps: quote?.eps,
+          // pe and eps are null in /stable/quote — compute from income statement
+          pe: (() => {
+            const inc0 = income[0] || {};
+            const eps = inc0.epsDiluted || inc0.eps || 0;
+            return eps > 0 && quote?.price ? Math.round((quote.price / eps) * 10) / 10 : null;
+          })(),
+          eps: (() => {
+            const inc0 = income[0] || {};
+            return inc0.epsDiluted || inc0.eps || null;
+          })(),
         },
         profit_bridge: {
           revenue: latest.revenue,
@@ -2543,16 +2626,31 @@ Rules:
           fcf_pct: latest.revenue > 0 && latestCf.freeCashFlow != null ? (latestCf.freeCashFlow / latest.revenue) * 100 : null,
         },
         key_ratios: {
-          pe: latestRatios.priceEarningsRatio,
-          pb: latestRatios.priceToBookRatio,
-          ps: latestRatios.priceToSalesRatio,
-          pfcf: latestRatios.priceToFreeCashFlowsRatio,
-          ev_ebitda: latestKm.enterpriseValueOverEBITDA,
-          roic: latestKm.roic != null ? latestKm.roic * 100 : null,
-          roe: latestKm.roe != null ? latestKm.roe * 100 : null,
-          dividend_yield: latestRatios.dividendYield != null ? latestRatios.dividendYield * 100 : null,
-          net_debt_ebitda: latestKm.netDebtToEBITDA,
-          current_ratio: latestRatios.currentRatio,
+          // priceEarningsRatio and priceToFreeCashFlowsRatio are null in /stable/ratios
+          // Compute from price / per-share values instead
+          pe: (() => {
+            const lat_inc = income[0] || {};
+            const eps = lat_inc.epsDiluted || lat_inc.eps || 0;
+            return eps > 0 && quote?.price ? quote.price / eps : (latestRatios.priceEarningsRatio || null);
+          })(),
+          pb: latestRatios.priceToBookRatio || null,
+          ps: latestRatios.priceToSalesRatio || null,
+          pfcf: (() => {
+            const lat_inc = income[0] || {};
+            const lat_cf = cashFlow[0] || {};
+            const shr = lat_inc.weightedAverageShsOutDil || lat_inc.weightedAverageShsOut || 0;
+            const fcf_ps = shr > 0 && lat_cf.freeCashFlow ? lat_cf.freeCashFlow / shr : 0;
+            return fcf_ps > 0 && quote?.price ? quote.price / fcf_ps : (latestRatios.priceToFreeCashFlowsRatio || null);
+          })(),
+          ev_ebitda: latestKm.evToEBITDA ?? latestKm.enterpriseValueOverEBITDA ?? null,
+          roic: latestKm.returnOnInvestedCapital != null ? latestKm.returnOnInvestedCapital * 100 : (latestKm.roic != null ? latestKm.roic * 100 : null),
+          roe: latestKm.returnOnEquity != null ? latestKm.returnOnEquity * 100 : (latestKm.roe != null ? latestKm.roe * 100 : null),
+          dividend_yield: (() => {
+            const lastDiv = profile?.lastDividend ?? profile?.lastDiv ?? 0;
+            return lastDiv > 0 && quote?.price ? (lastDiv / quote.price) * 100 : null;
+          })(),
+          net_debt_ebitda: latestKm.netDebtToEBITDA ?? null,
+          current_ratio: latestKm.currentRatio ?? latestRatios.currentRatio ?? null,
         },
         margin_trend: marginTrend, // 5 years, chronological
       });
