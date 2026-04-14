@@ -1,14 +1,23 @@
 FROM node:20-slim
 
-# Install build tools for better-sqlite3 native compilation
-RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
+# Build tools for native modules
+RUN apt-get update && apt-get install -y \
+    python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+# Install deps first (cache layer)
 COPY package.json package-lock.json ./
-RUN npm ci
 
+# Install all deps, then force-rebuild better-sqlite3 for this exact platform
+RUN npm ci --ignore-scripts && \
+    npm rebuild better-sqlite3 --build-from-source
+
+# Copy source
 COPY . .
+
+# Build the app
 RUN npm run build
 
 ENV NODE_ENV=production

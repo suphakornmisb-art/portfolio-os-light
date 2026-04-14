@@ -12,7 +12,8 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { eq, asc } from "drizzle-orm";
 
-const sqlite = new Database("data.db");
+const DB_PATH = process.env.DB_PATH || "data.db";
+const sqlite = new Database(DB_PATH);
 sqlite.pragma("journal_mode = WAL");
 
 // Create tables if they don't exist
