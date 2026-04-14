@@ -9,7 +9,7 @@
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
     "db:push": "drizzle-kit push",
-    "postinstall": "npm rebuild better-sqlite3"
+    "postinstall": "echo 'no native rebuild needed'"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
