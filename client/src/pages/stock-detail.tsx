@@ -1,3 +1,4 @@
+import React, { useState } from "react";
 import { useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
@@ -547,7 +548,7 @@ export default function StockDetailPage() {
 // ─── Business Description with Read More ─────────────────────────────────────
 
 function BusinessDescription({ text }: { text: string }) {
-  const [expanded, setExpanded] = React.useState(false);
+  const [expanded, setExpanded] = useState(false);
   const LIMIT = 280;
   const short = text.length > LIMIT && !expanded;
 
@@ -569,5 +570,4 @@ function BusinessDescription({ text }: { text: string }) {
   );
 }
 
-// Need React import for useState in BusinessDescription
-import React from "react";
+// React and useState imported at top of file

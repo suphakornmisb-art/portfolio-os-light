@@ -1460,19 +1460,13 @@ Return JSON:
       if (exchangeRateCache && now - exchangeRateCachedAt < EXCHANGE_CACHE_TTL) {
         return res.json({ ...exchangeRateCache, pair: "USD/THB" });
       }
-      const data = await fetchFmpJson("fx");
-      const pairs = Array.isArray(data) ? data : (data?.quotes || []);
-      // Look for USDTHB or USD/THB
-      const entry = pairs.find((p: any) =>
-        p.ticker === "USDTHB" ||
-        p.symbol === "USDTHB" ||
-        (p.fromCurrency === "USD" && p.toCurrency === "THB") ||
-        p.name === "USD/THB"
-      );
-      const rate = entry ? (entry.ask || entry.bid || entry.price || entry.rate || 33.5) : 33.5;
-      exchangeRateCache = { rate: Number(rate), cached_at: new Date().toISOString() };
+      // FMP /stable/fx returns empty [] — use quote?symbol=USDTHB instead
+      const data = await fetchFmpJson("quote?symbol=USDTHB");
+      const quote = Array.isArray(data) && data.length > 0 ? data[0] : null;
+      const rate = quote?.price ? Number(quote.price) : 33.5;
+      exchangeRateCache = { rate, cached_at: new Date().toISOString() };
       exchangeRateCachedAt = now;
-      res.json({ rate: Number(rate), pair: "USD/THB", cached_at: exchangeRateCache.cached_at });
+      res.json({ rate, pair: "USD/THB", cached_at: exchangeRateCache.cached_at });
     } catch (err: any) {
       // Fallback to approximate rate
       const fallback = { rate: 33.5, pair: "USD/THB", cached_at: new Date().toISOString() };
