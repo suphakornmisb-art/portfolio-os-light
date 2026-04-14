@@ -1,11 +1,3 @@
-node_modules/
-dist/
-*.db
-*.db-shm
-*.db-wal
-.netlify/
-
-# SQLite
 data.db
 data.db-shm
 data.db-wal

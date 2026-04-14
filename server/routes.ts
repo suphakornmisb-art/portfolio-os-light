@@ -690,6 +690,155 @@ export async function registerRoutes(
     res.json(imported);
   });
 
+  // ── Screenshot Import (Groq Vision) ──
+  app.post("/api/holdings/import-screenshot", async (req, res) => {
+    try {
+      const { images } = req.body; // Array of { data: base64string, mimeType: "image/jpeg" }
+      if (!Array.isArray(images) || images.length === 0) {
+        return res.status(400).json({ error: "images array required" });
+      }
+      if (!GROQ_API_KEY) {
+        return res.status(400).json({ error: "GROQ_API_KEY not configured" });
+      }
+
+      const groq = new Groq({ apiKey: GROQ_API_KEY });
+      const extracted: { ticker: string; shares: number; avg_cost: number; notes: string }[] = [];
+
+      for (const img of images) {
+        try {
+          const completion = await groq.chat.completions.create({
+            model: "meta-llama/llama-4-scout-17b-16e-instruct",
+            messages: [{
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: `Extract the stock transaction from this brokerage screenshot.
+Return ONLY a JSON object with these exact fields:
+{
+  "ticker": "SYMBOL",
+  "shares": 0.123,
+  "avg_cost": 123.45,
+  "action": "buy" or "sell",
+  "notes": "brief context"
+}
+
+Rules:
+- ticker: the US stock symbol shown (e.g. SPGI, MSFT, AAPL)
+- shares: the number of shares/quantity
+- avg_cost: the executed price in USD (not THB). If only THB is shown, use the exchange rate to convert.
+- action: whether this is a buy or sell order
+- notes: include the date and any useful context
+
+Return ONLY valid JSON, no markdown, no explanation.`,
+                },
+                {
+                  type: "image_url",
+                  image_url: { url: `data:${img.mimeType || "image/jpeg"};base64,${img.data}` },
+                },
+              ],
+            }],
+            response_format: { type: "json_object" },
+            temperature: 0.1,
+            max_tokens: 300,
+          });
+
+          const raw = completion.choices[0]?.message?.content || "{}";
+          const parsed = JSON.parse(raw);
+          if (parsed.ticker && typeof parsed.shares === "number" && typeof parsed.avg_cost === "number") {
+            extracted.push({
+              ticker: parsed.ticker.toUpperCase().replace(/-/g, "."),
+              shares: parsed.shares,
+              avg_cost: parsed.avg_cost,
+              notes: parsed.notes || "",
+            });
+          }
+        } catch (err: any) {
+          console.error("Vision extraction error:", err.message);
+          // Continue with other images
+        }
+        await delay(300); // rate limit
+      }
+
+      // Now compute diff against existing holdings
+      const existing = await storage.getAllHoldings();
+      const existingMap = new Map(existing.map(h => [h.ticker, h]));
+
+      const diff = extracted.map(e => {
+        const ex = existingMap.get(e.ticker);
+        if (ex) {
+          // Compute new weighted avg cost
+          const totalShares = ex.shares + e.shares;
+          const newAvgCost = totalShares > 0
+            ? ((ex.shares * ex.avg_cost) + (e.shares * e.avg_cost)) / totalShares
+            : e.avg_cost;
+          return {
+            ticker: e.ticker,
+            action: "update" as const,
+            existing_shares: ex.shares,
+            new_shares: totalShares,
+            existing_avg_cost: ex.avg_cost,
+            new_avg_cost: Math.round(newAvgCost * 10000) / 10000,
+            added_shares: e.shares,
+            added_cost: e.avg_cost,
+            notes: e.notes,
+            existing_id: ex.id,
+          };
+        } else {
+          return {
+            ticker: e.ticker,
+            action: "create" as const,
+            existing_shares: 0,
+            new_shares: e.shares,
+            existing_avg_cost: 0,
+            new_avg_cost: e.avg_cost,
+            added_shares: e.shares,
+            added_cost: e.avg_cost,
+            notes: e.notes,
+            existing_id: null,
+          };
+        }
+      });
+
+      res.json({ extracted, diff });
+    } catch (err: any) {
+      console.error("Screenshot import error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Apply Screenshot Import ──
+  app.post("/api/holdings/apply-import", async (req, res) => {
+    try {
+      const { changes } = req.body; // Array of diff items to apply
+      if (!Array.isArray(changes)) return res.status(400).json({ error: "changes array required" });
+
+      const results: Holding[] = [];
+      for (const c of changes) {
+        if (c.action === "update" && c.existing_id) {
+          const updated = await storage.updateHolding(c.existing_id, {
+            shares: c.new_shares,
+            avg_cost: c.new_avg_cost,
+          });
+          if (updated) results.push(updated);
+        } else if (c.action === "create") {
+          const created = await storage.createHolding({
+            ticker: c.ticker,
+            shares: c.new_shares,
+            avg_cost: c.new_avg_cost,
+            bdd_type: "engine",
+            sector: "",
+            notes: c.notes || "",
+          });
+          results.push(created);
+        }
+      }
+      res.json(results);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // ── Enrichments ──
   app.get("/api/enrichments", async (_req, res) => {
     const all = await storage.getAllEnrichments();
@@ -1798,6 +1947,238 @@ Return JSON:
       res.send(csv);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Screenshot Import (Groq Vision) ──
+
+  app.post("/api/holdings/import-screenshot", async (req, res) => {
+    try {
+      const { images } = req.body as {
+        images: { data: string; mimeType: string }[];
+      };
+      if (!images || images.length === 0) {
+        return res.status(400).json({ error: "No images provided" });
+      }
+      if (!GROQ_API_KEY) {
+        return res.status(500).json({ error: "GROQ_API_KEY not configured" });
+      }
+
+      const groq = new Groq({ apiKey: GROQ_API_KEY });
+
+      // Build vision messages — one per image
+      const imageMessages: any[] = images.map((img) => ({
+        type: "image_url",
+        image_url: { url: `data:${img.mimeType};base64,${img.data}` },
+      }));
+
+      const systemPrompt = `You are a financial data extractor. You will receive screenshots from a brokerage app called Dime!.
+
+There are TWO types of screenshots:
+
+1. **Portfolio overview ("My Assets")** — A scrollable list showing multiple holdings. Each holding shows:
+   - Ticker symbol (e.g. SCHD, VOO, GOOGL)
+   - Weight percentage (e.g. 19.49%)
+   - Holding Value (USD)
+   - Current Price
+   - Price & ID Change %
+   - When expanded: Outstanding Shares, Cost per Share (USD), Total Cost (USD), Unrealized P/L
+
+2. **Individual order confirmation** — Shows a single transaction:
+   - "Buy [TICKER]" header
+   - Executed Price (USD)
+   - Shares purchased
+   - USD Amount
+   - Submission/Completion date
+
+Extract ALL holdings/transactions visible in the screenshots. For portfolio screenshots, extract every row visible in the list. A single portfolio screenshot may contain 3-6 holdings.
+
+Return a JSON object with this EXACT structure:
+{
+  "holdings": [
+    {
+      "ticker": "SCHD",
+      "shares": 300.485687,
+      "avg_cost": 30.9534,
+      "type": "portfolio"
+    }
+  ]
+}
+
+Rules:
+- "ticker" = exact ticker symbol as shown (uppercase, e.g. "SCHD", "VOO", "BRK.B")
+- "shares" = Outstanding Shares (from portfolio view) or Shares (from order confirmation). Use the exact decimal value shown.
+- "avg_cost" = Cost per Share USD (from portfolio view) or Executed Price USD (from order confirmation). Use the exact decimal value shown.
+- "type" = "portfolio" for My Assets screenshots, "transaction" for order confirmations
+- Extract EVERY visible holding, even partially visible ones at the top/bottom edges if the ticker and at least shares OR cost is readable
+- If a holding's expanded details are not visible (only ticker, value, price shown but NOT shares/cost), still extract it with shares=0 and avg_cost=0 — we will skip these during import
+- Do NOT invent data. Only extract what is clearly visible in the image.
+- Return ONLY valid JSON, no markdown fences.`;
+
+      const completion = await groq.chat.completions.create({
+        model: "meta-llama/llama-4-scout-17b-16e-instruct",
+        messages: [
+          { role: "user", content: [
+            { type: "text", text: systemPrompt },
+            ...imageMessages,
+          ]},
+        ],
+        temperature: 0.1,
+        max_tokens: 4000,
+      });
+
+      const raw = completion.choices[0]?.message?.content || "{}";
+      // Strip markdown fences if present
+      const cleaned = raw.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+      let parsed: { holdings: { ticker: string; shares: number; avg_cost: number; type: string }[] };
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch {
+        return res.status(422).json({ error: "Failed to parse vision response", raw: cleaned });
+      }
+
+      if (!parsed.holdings || parsed.holdings.length === 0) {
+        return res.json({ diff: [], message: "No holdings extracted" });
+      }
+
+      // Filter out holdings with no usable data
+      const usable = parsed.holdings.filter((h) => h.shares > 0 && h.avg_cost > 0);
+
+      // Fetch existing holdings to build diff
+      const existing = await storage.getAllHoldings();
+      const existingMap = new Map(existing.map((h) => [h.ticker.toUpperCase(), h]));
+
+      // Deduplicate extracted holdings (same ticker across multiple screenshots) — keep the one with most data
+      const deduped = new Map<string, typeof usable[0]>();
+      for (const h of usable) {
+        const key = h.ticker.toUpperCase();
+        const prev = deduped.get(key);
+        if (!prev || (h.shares > 0 && h.avg_cost > 0 && (!prev.shares || !prev.avg_cost))) {
+          deduped.set(key, h);
+        }
+      }
+
+      const diff = Array.from(deduped.values()).map((h) => {
+        const key = h.ticker.toUpperCase();
+        const ex = existingMap.get(key);
+
+        if (h.type === "transaction" && ex) {
+          // Transaction: merge into existing — add shares, recalculate avg cost
+          const totalShares = ex.shares + h.shares;
+          const totalCost = ex.shares * ex.avg_cost + h.shares * h.avg_cost;
+          const newAvgCost = totalShares > 0 ? totalCost / totalShares : h.avg_cost;
+          return {
+            ticker: ex.ticker,
+            action: "update" as const,
+            existing_shares: ex.shares,
+            new_shares: totalShares,
+            existing_avg_cost: ex.avg_cost,
+            new_avg_cost: newAvgCost,
+            added_shares: h.shares,
+            added_cost: h.avg_cost,
+            notes: "Transaction merge",
+            existing_id: ex.id,
+          };
+        } else if (h.type === "transaction" && !ex) {
+          // Transaction: new holding
+          return {
+            ticker: h.ticker,
+            action: "create" as const,
+            existing_shares: 0,
+            new_shares: h.shares,
+            existing_avg_cost: 0,
+            new_avg_cost: h.avg_cost,
+            added_shares: h.shares,
+            added_cost: h.avg_cost,
+            notes: "New from transaction",
+            existing_id: null,
+          };
+        } else if (ex) {
+          // Portfolio: overwrite existing with screenshot data (full portfolio sync)
+          return {
+            ticker: ex.ticker,
+            action: "update" as const,
+            existing_shares: ex.shares,
+            new_shares: h.shares,
+            existing_avg_cost: ex.avg_cost,
+            new_avg_cost: h.avg_cost,
+            added_shares: h.shares - ex.shares,
+            added_cost: h.avg_cost,
+            notes: Math.abs(h.shares - ex.shares) < 0.0001 && Math.abs(h.avg_cost - ex.avg_cost) < 0.01 ? "No change" : "Portfolio sync",
+            existing_id: ex.id,
+          };
+        } else {
+          // Portfolio: new holding
+          return {
+            ticker: h.ticker,
+            action: "create" as const,
+            existing_shares: 0,
+            new_shares: h.shares,
+            existing_avg_cost: 0,
+            new_avg_cost: h.avg_cost,
+            added_shares: h.shares,
+            added_cost: h.avg_cost,
+            notes: "New holding",
+            existing_id: null,
+          };
+        }
+      });
+
+      // Sort: changes first, "No change" last
+      diff.sort((a, b) => {
+        if (a.notes === "No change" && b.notes !== "No change") return 1;
+        if (a.notes !== "No change" && b.notes === "No change") return -1;
+        return 0;
+      });
+
+      res.json({ diff, extracted_count: parsed.holdings.length, usable_count: usable.length });
+    } catch (err: any) {
+      console.error("Screenshot import error:", err);
+      res.status(500).json({ error: err.message || "Vision extraction failed" });
+    }
+  });
+
+  app.post("/api/holdings/apply-import", async (req, res) => {
+    try {
+      const { changes } = req.body as {
+        changes: {
+          ticker: string;
+          action: "create" | "update";
+          new_shares: number;
+          new_avg_cost: number;
+          existing_id: number | null;
+        }[];
+      };
+
+      if (!changes || changes.length === 0) {
+        return res.status(400).json({ error: "No changes to apply" });
+      }
+
+      const results: any[] = [];
+      for (const c of changes) {
+        if (c.action === "update" && c.existing_id != null) {
+          const updated = await storage.updateHolding(c.existing_id, {
+            shares: c.new_shares,
+            avg_cost: c.new_avg_cost,
+          });
+          results.push(updated);
+        } else if (c.action === "create") {
+          const created = await storage.createHolding({
+            ticker: c.ticker.toUpperCase(),
+            shares: c.new_shares,
+            avg_cost: c.new_avg_cost,
+            bdd_type: "engine",
+            sector: "",
+            notes: "Imported from screenshot",
+          });
+          results.push(created);
+        }
+      }
+
+      res.json(results);
+    } catch (err: any) {
+      console.error("Apply import error:", err);
+      res.status(500).json({ error: err.message || "Apply failed" });
     }
   });
 

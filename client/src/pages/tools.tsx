@@ -1,5 +1,5 @@
 import { Link } from "wouter";
-import { DollarSign, Target, TrendingDown, Download, ArrowRight, Wrench } from "lucide-react";
+import { DollarSign, Target, TrendingDown, Download, Camera, ArrowRight, Wrench } from "lucide-react";
 
 const TOOLS = [
   {
@@ -33,6 +33,14 @@ const TOOLS = [
     description: "Download your portfolio as CSV or full JSON snapshot for archiving",
     color: "text-purple-400",
     bg: "bg-purple-500/10",
+  },
+  {
+    path: "/tools/import",
+    icon: Camera,
+    title: "Screenshot Import",
+    description: "Upload Dime! screenshots to import or sync your portfolio holdings",
+    color: "text-cyan-400",
+    bg: "bg-cyan-500/10",
   },
 ];
 

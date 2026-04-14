@@ -16,6 +16,7 @@ import ToolsCapital from "@/pages/tools-capital";
 import ToolsPosition from "@/pages/tools-position";
 import ToolsCostBasis from "@/pages/tools-costbasis";
 import ToolsExport from "@/pages/tools-export";
+import ToolsImport from "@/pages/tools-import";
 import { CurrencyProvider, useCurrency } from "@/contexts/CurrencyContext";
 import {
   LayoutGrid,
@@ -245,6 +246,9 @@ function AppRouter() {
       </Route>
       <Route path="/tools/export">
         {() => <Shell><ToolsExport /></Shell>}
+      </Route>
+      <Route path="/tools/import">
+        {() => <Shell><ToolsImport /></Shell>}
       </Route>
       <Route path="/tools">
         {() => <Shell><ToolsHub /></Shell>}
