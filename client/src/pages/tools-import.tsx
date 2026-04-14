@@ -15,9 +15,20 @@ import {
   X,
   ImagePlus,
   CheckCircle2,
-  ArrowRightLeft,
   AlertCircle,
+  Trash2,
+  LayoutList,
+  Receipt,
+  ArrowRight,
 } from "lucide-react";
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+interface ExtractedHolding {
+  ticker: string;
+  shares: number;
+  avg_cost: number;
+}
 
 interface DiffItem {
   ticker: string;
@@ -33,30 +44,49 @@ interface DiffItem {
   selected: boolean;
 }
 
+interface MissingItem {
+  ticker: string;
+  action: "delete";
+  existing_shares: number;
+  existing_avg_cost: number;
+  existing_id: number;
+  notes: string;
+  selected: boolean;
+}
+
+type Mode = "portfolio" | "transaction";
+type Stage = "pick-mode" | "collecting" | "extracting" | "review" | "applying" | "done";
+
+// ── Component ────────────────────────────────────────────────────────────────
+
 export default function ToolsImport() {
   const { toast } = useToast();
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // State machine: idle → extracting → preview → applying → done
-  const [stage, setStage] = useState<"idle" | "extracting" | "preview" | "applying" | "done">("idle");
+  const [mode, setMode] = useState<Mode | null>(null);
+  const [stage, setStage] = useState<Stage>("pick-mode");
+
+  // Accumulated extracted holdings across batches (portfolio mode)
+  const [accumulated, setAccumulated] = useState<ExtractedHolding[]>([]);
+  const [batchCount, setBatchCount] = useState(0);
+
+  // Current batch images waiting to be sent
   const [images, setImages] = useState<{ data: string; mimeType: string; name: string }[]>([]);
+
+  // Diff results
   const [diff, setDiff] = useState<DiffItem[]>([]);
-  const [extractInfo, setExtractInfo] = useState<{ extracted: number; usable: number } | null>(null);
+  const [missing, setMissing] = useState<MissingItem[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  // Convert File to base64
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
+  // ── Helpers ──
+
+  const fileToBase64 = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = () => {
-        const result = reader.result as string;
-        const base64 = result.split(",")[1];
-        resolve(base64);
-      };
+      reader.onload = () => resolve((reader.result as string).split(",")[1]);
       reader.onerror = reject;
       reader.readAsDataURL(file);
     });
-  };
 
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -69,76 +99,129 @@ export default function ToolsImport() {
     setImages((prev) => [...prev, ...newImages]);
   };
 
-  const removeImage = (idx: number) => {
-    setImages((prev) => prev.filter((_, i) => i !== idx));
-  };
+  const removeImage = (idx: number) => setImages((prev) => prev.filter((_, i) => i !== idx));
 
-  // Extract from screenshots
-  const extractMutation = useMutation({
+  // Deduplicated count of unique tickers in accumulated
+  const uniqueTickers = new Set(accumulated.filter((h) => h.shares > 0 && h.avg_cost > 0).map((h) => h.ticker));
+
+  // ── Extract batch ──
+
+  const extractBatch = useMutation({
     mutationFn: async () => {
       setError(null);
       setStage("extracting");
-      const res = await apiRequest("POST", "/api/holdings/import-screenshot", {
+      const res = await apiRequest("POST", "/api/holdings/extract-screenshots", {
         images: images.map((img) => ({ data: img.data, mimeType: img.mimeType })),
+        mode: mode!,
       });
       return res.json();
     },
     onSuccess: (data) => {
-      if (!data.diff || data.diff.length === 0) {
-        setError("Could not extract any holdings from the screenshots. Try clearer images or make sure the expanded details (shares, cost) are visible.");
-        setStage("idle");
+      const extracted: ExtractedHolding[] = data.holdings || [];
+      const usable = extracted.filter((h) => h.shares > 0 && h.avg_cost > 0);
+
+      if (usable.length === 0 && extracted.length === 0) {
+        setError("Could not extract any holdings from these screenshots. Try clearer images.");
+        setStage("collecting");
         return;
       }
-      setExtractInfo({ extracted: data.extracted_count || 0, usable: data.usable_count || 0 });
-      // Auto-deselect "No change" items, select everything else
-      setDiff(data.diff.map((d: any) => ({ ...d, selected: d.notes !== "No change" })));
-      setStage("preview");
+
+      // Merge into accumulated (newer overrides older for same ticker)
+      setAccumulated((prev) => {
+        const map = new Map<string, ExtractedHolding>();
+        for (const h of prev) map.set(h.ticker, h);
+        for (const h of extracted) {
+          if (h.shares > 0 && h.avg_cost > 0) map.set(h.ticker, h);
+        }
+        return Array.from(map.values());
+      });
+
+      setBatchCount((c) => c + 1);
+      setImages([]);
+
+      const newUsable = usable.length;
+      toast({
+        title: `Batch extracted`,
+        description: `${newUsable} holding(s) found in ${images.length} image(s)`,
+      });
+
+      if (mode === "transaction") {
+        // Transaction mode: go straight to diff after extract
+        buildDiff(extracted);
+      } else {
+        setStage("collecting");
+      }
     },
     onError: (err: any) => {
       setError(err.message || "Extraction failed");
-      setStage("idle");
+      setStage("collecting");
     },
   });
 
-  // Apply selected changes
+  // ── Build diff (for review) ──
+
+  const buildDiff = async (holdings?: ExtractedHolding[]) => {
+    try {
+      setError(null);
+      setStage("extracting"); // reuse spinner
+      const payload = holdings || accumulated;
+      const res = await apiRequest("POST", "/api/holdings/diff-import", {
+        holdings: payload,
+        mode: mode!,
+      });
+      const data = await res.json();
+
+      setDiff((data.diff || []).map((d: any) => ({ ...d, selected: d.notes !== "No change" })));
+      setMissing((data.missing || []).map((m: any) => ({ ...m, selected: false })));
+      setStage("review");
+    } catch (err: any) {
+      setError(err.message || "Failed to build diff");
+      setStage("collecting");
+    }
+  };
+
+  // ── Apply ──
+
   const applyMutation = useMutation({
     mutationFn: async () => {
       setStage("applying");
-      const selected = diff.filter((d) => d.selected);
-      const res = await apiRequest("POST", "/api/holdings/apply-import", { changes: selected });
+      const changes = diff.filter((d) => d.selected);
+      const deletions = missing.filter((m) => m.selected).map((m) => ({ existing_id: m.existing_id }));
+      const res = await apiRequest("POST", "/api/holdings/apply-import", { changes, deletions });
       return res.json();
     },
     onSuccess: (data) => {
-      toast({ title: `${data.length} holding(s) updated` });
+      toast({ title: `${data.applied} change(s) applied` });
       queryClient.invalidateQueries({ queryKey: ["/api/holdings"] });
       queryClient.invalidateQueries({ queryKey: ["/api/prices"] });
       setStage("done");
     },
     onError: (err: any) => {
       setError(err.message || "Apply failed");
-      setStage("preview");
+      setStage("review");
     },
   });
 
-  const toggleItem = (idx: number) => {
-    setDiff((prev) =>
-      prev.map((d, i) => (i === idx ? { ...d, selected: !d.selected } : d)),
-    );
-  };
+  const toggleDiff = (idx: number) => setDiff((prev) => prev.map((d, i) => (i === idx ? { ...d, selected: !d.selected } : d)));
+  const toggleMissing = (idx: number) => setMissing((prev) => prev.map((m, i) => (i === idx ? { ...m, selected: !m.selected } : m)));
 
-  const selectAll = () => setDiff((prev) => prev.map((d) => ({ ...d, selected: true })));
-  const deselectAll = () => setDiff((prev) => prev.map((d) => ({ ...d, selected: false })));
-
-  const selectedCount = diff.filter((d) => d.selected).length;
-  const changedCount = diff.filter((d) => d.notes !== "No change").length;
+  const selectedChanges = diff.filter((d) => d.selected).length;
+  const selectedDeletions = missing.filter((m) => m.selected).length;
+  const changedItems = diff.filter((d) => d.notes !== "No change");
+  const unchangedItems = diff.filter((d) => d.notes === "No change");
 
   const reset = () => {
-    setStage("idle");
+    setMode(null);
+    setStage("pick-mode");
+    setAccumulated([]);
+    setBatchCount(0);
     setImages([]);
     setDiff([]);
-    setExtractInfo(null);
+    setMissing([]);
     setError(null);
   };
+
+  // ── Render ──
 
   return (
     <div className="space-y-4 pb-24">
@@ -155,41 +238,90 @@ export default function ToolsImport() {
             Screenshot Import
           </h1>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Upload Dime! screenshots to import or sync your holdings
+            Import holdings from Dime! screenshots
           </p>
         </div>
       </div>
 
-      {/* Stage: Idle — upload images */}
-      {(stage === "idle" || stage === "extracting") && (
-        <div className="space-y-4">
-          {/* Instructions */}
-          <div className="rounded-lg border border-border bg-card/50 p-3.5 space-y-2">
-            <p className="text-xs font-medium text-foreground">Supported screenshots</p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-muted-foreground">
-              <div className="flex items-start gap-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
-                <span>
-                  <span className="text-foreground font-medium">Portfolio view</span> — Dime! "My Assets" screenshots with expanded details (shares + cost visible)
-                </span>
+      {/* ── Pick Mode ── */}
+      {stage === "pick-mode" && (
+        <div className="space-y-3">
+          <p className="text-xs text-muted-foreground">Choose import type</p>
+          <button
+            className="w-full rounded-lg border border-border bg-card p-4 hover:border-primary/40 transition-colors text-left group"
+            onClick={() => { setMode("portfolio"); setStage("collecting"); }}
+            data-testid="button-mode-portfolio"
+          >
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-lg bg-emerald-500/10 shrink-0">
+                <LayoutList className="w-4 h-4 text-emerald-400" />
               </div>
-              <div className="flex items-start gap-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-blue-400 mt-1.5 shrink-0" />
-                <span>
-                  <span className="text-foreground font-medium">Order confirmation</span> — Individual buy/sell order screenshots
-                </span>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold text-foreground">Portfolio Sync</h2>
+                  <ArrowRight className="w-4 h-4 text-muted-foreground group-hover:text-primary transition-colors" />
+                </div>
+                <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
+                  Upload "My Assets" screenshots in batches. Scroll through your portfolio, screenshot each holding's expanded details, upload a few at a time. When done, review the full diff and apply once.
+                </p>
               </div>
             </div>
-          </div>
+          </button>
+          <button
+            className="w-full rounded-lg border border-border bg-card p-4 hover:border-primary/40 transition-colors text-left group"
+            onClick={() => { setMode("transaction"); setStage("collecting"); }}
+            data-testid="button-mode-transaction"
+          >
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-lg bg-blue-500/10 shrink-0">
+                <Receipt className="w-4 h-4 text-blue-400" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold text-foreground">Transaction Import</h2>
+                  <ArrowRight className="w-4 h-4 text-muted-foreground group-hover:text-primary transition-colors" />
+                </div>
+                <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
+                  Upload order confirmation screenshots. Each buy gets merged into your existing holdings.
+                </p>
+              </div>
+            </div>
+          </button>
+        </div>
+      )}
+
+      {/* ── Collecting (upload batches) ── */}
+      {(stage === "collecting" || stage === "extracting") && (
+        <div className="space-y-4">
+          {/* Progress bar for portfolio mode */}
+          {mode === "portfolio" && (
+            <div className="rounded-lg border border-border bg-card/50 p-3.5">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-medium text-foreground">
+                  {uniqueTickers.size} unique holding(s) collected
+                </span>
+                <span className="text-[10px] text-muted-foreground">
+                  {batchCount} batch(es) processed
+                </span>
+              </div>
+              {/* Show collected tickers */}
+              {uniqueTickers.size > 0 && (
+                <div className="flex flex-wrap gap-1 mt-2">
+                  {Array.from(uniqueTickers).sort().map((t) => (
+                    <span key={t} className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">
+                      {t}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Drop zone */}
           <div
-            className="rounded-lg border-2 border-dashed border-border hover:border-primary/40 bg-card p-8 text-center transition-colors cursor-pointer"
+            className="rounded-lg border-2 border-dashed border-border hover:border-primary/40 bg-card p-6 text-center transition-colors cursor-pointer"
             onClick={() => fileRef.current?.click()}
-            onDrop={(e) => {
-              e.preventDefault();
-              handleFiles(e.dataTransfer.files);
-            }}
+            onDrop={(e) => { e.preventDefault(); handleFiles(e.dataTransfer.files); }}
             onDragOver={(e) => e.preventDefault()}
             data-testid="dropzone-import"
           >
@@ -199,104 +331,102 @@ export default function ToolsImport() {
               accept="image/*"
               multiple
               className="hidden"
-              onChange={(e) => handleFiles(e.target.files)}
+              onChange={(e) => { handleFiles(e.target.files); if (e.target) e.target.value = ""; }}
             />
-            <ImagePlus className="w-8 h-8 text-muted-foreground mx-auto mb-3" />
-            <p className="text-sm font-medium text-foreground">Tap to select screenshots</p>
+            <ImagePlus className="w-7 h-7 text-muted-foreground mx-auto mb-2" />
+            <p className="text-sm font-medium text-foreground">
+              {mode === "portfolio" ? "Add next batch of screenshots" : "Select order screenshots"}
+            </p>
             <p className="text-xs text-muted-foreground mt-1">
-              Upload multiple screenshots at once — each will be scanned for holdings
+              {mode === "portfolio"
+                ? "Upload a few at a time — keep adding until you've covered all holdings"
+                : "One order confirmation per image"}
             </p>
           </div>
 
-          {/* Image preview thumbnails */}
+          {/* Queued images */}
           {images.length > 0 && (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-muted-foreground">{images.length} image(s) selected</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => fileRef.current?.click()}
-                  className="h-7 text-xs gap-1"
-                >
-                  <Plus className="w-3 h-3" />
-                  Add more
+                <span className="text-xs font-medium text-muted-foreground">
+                  {images.length} image(s) ready to scan
+                </span>
+                <Button variant="ghost" size="sm" onClick={() => fileRef.current?.click()} className="h-7 text-xs gap-1">
+                  <Plus className="w-3 h-3" /> Add more
                 </Button>
               </div>
-              <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+              <div className="grid grid-cols-4 sm:grid-cols-5 gap-1.5">
                 {images.map((img, i) => (
-                  <div key={i} className="relative group rounded-lg overflow-hidden border border-border bg-muted aspect-[3/4]">
-                    <img
-                      src={`data:${img.mimeType};base64,${img.data}`}
-                      alt={img.name}
-                      className="w-full h-full object-cover"
-                    />
+                  <div key={i} className="relative group rounded-md overflow-hidden border border-border bg-muted aspect-[3/4]">
+                    <img src={`data:${img.mimeType};base64,${img.data}`} alt={img.name} className="w-full h-full object-cover" />
                     <button
                       onClick={(e) => { e.stopPropagation(); removeImage(i); }}
-                      className="absolute top-1 right-1 p-1 rounded-full bg-black/60 hover:bg-red-500 transition-colors"
+                      className="absolute top-0.5 right-0.5 p-0.5 rounded-full bg-black/60 hover:bg-red-500 transition-colors"
                     >
-                      <X className="w-3 h-3 text-white" />
+                      <X className="w-2.5 h-2.5 text-white" />
                     </button>
-                    <div className="absolute bottom-0 left-0 right-0 bg-black/60 px-1.5 py-0.5">
-                      <span className="text-[9px] text-white truncate block">{img.name}</span>
-                    </div>
                   </div>
                 ))}
               </div>
+            </div>
+          )}
 
-              {error && (
-                <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-                  <p className="text-xs text-red-400">{error}</p>
-                </div>
-              )}
+          {error && (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+              <p className="text-xs text-red-400">{error}</p>
+            </div>
+          )}
 
+          {/* Action buttons */}
+          <div className="flex gap-2">
+            {images.length > 0 && (
               <Button
-                onClick={() => extractMutation.mutate()}
+                onClick={() => extractBatch.mutate()}
                 disabled={stage === "extracting"}
-                className="w-full gap-2"
-                data-testid="button-extract"
+                className="flex-1 gap-2"
+                data-testid="button-extract-batch"
               >
                 {stage === "extracting" ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Scanning {images.length} image(s)...
-                  </>
+                  <><Loader2 className="w-4 h-4 animate-spin" /> Scanning...</>
                 ) : (
-                  <>
-                    <Upload className="w-4 h-4" />
-                    Extract Holdings
-                  </>
+                  <><Upload className="w-4 h-4" /> Scan {images.length} Image(s)</>
                 )}
               </Button>
-            </div>
+            )}
+            {mode === "portfolio" && uniqueTickers.size > 0 && images.length === 0 && stage !== "extracting" && (
+              <Button
+                onClick={() => buildDiff()}
+                className="flex-1 gap-2"
+                data-testid="button-review-diff"
+              >
+                <Check className="w-4 h-4" />
+                Done — Review {uniqueTickers.size} Holdings
+              </Button>
+            )}
+          </div>
+
+          {/* Back to mode picker */}
+          {stage === "collecting" && batchCount === 0 && images.length === 0 && (
+            <Button variant="ghost" size="sm" onClick={reset} className="text-xs text-muted-foreground gap-1">
+              <ArrowLeft className="w-3 h-3" /> Change mode
+            </Button>
           )}
         </div>
       )}
 
-      {/* Stage: Preview — diff table */}
-      {stage === "preview" && (
+      {/* ── Review Diff ── */}
+      {stage === "review" && (
         <div className="space-y-4">
-          {/* Summary bar */}
+          {/* Summary */}
           <div className="rounded-lg border border-border bg-card/50 p-3 flex items-center justify-between">
             <div className="text-xs text-muted-foreground">
-              {extractInfo && (
-                <span>Extracted {extractInfo.extracted} holdings, {extractInfo.usable} with complete data</span>
-              )}
+              {changedItems.length} change(s)
+              {unchangedItems.length > 0 && <>, {unchangedItems.length} unchanged</>}
+              {missing.length > 0 && <>, {missing.length} not in screenshots</>}
             </div>
-            <div className="flex items-center gap-2">
-              <button onClick={selectAll} className="text-[10px] text-primary hover:underline">Select all</button>
-              <span className="text-muted-foreground/30">|</span>
-              <button onClick={deselectAll} className="text-[10px] text-muted-foreground hover:underline">Deselect all</button>
-            </div>
-          </div>
-
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium text-foreground">
-              Review {diff.length} holding(s)
-            </span>
             <Badge variant="outline" className="text-xs font-mono">
-              {selectedCount} selected
+              {selectedChanges + selectedDeletions} selected
             </Badge>
           </div>
 
@@ -308,59 +438,44 @@ export default function ToolsImport() {
           )}
 
           {/* Changed items */}
-          {changedCount > 0 && (
+          {changedItems.length > 0 && (
             <div className="space-y-2">
               <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Changes</span>
-              {diff.filter((d) => d.notes !== "No change").map((d, i) => {
+              {changedItems.map((d) => {
                 const realIdx = diff.indexOf(d);
                 return (
                   <div
                     key={d.ticker}
-                    className={`rounded-lg border bg-card p-3.5 transition-colors cursor-pointer ${
+                    className={`rounded-lg border bg-card p-3 transition-colors cursor-pointer ${
                       d.selected ? "border-primary/40" : "border-border opacity-50"
                     }`}
-                    onClick={() => toggleItem(realIdx)}
+                    onClick={() => toggleDiff(realIdx)}
                     data-testid={`card-import-${d.ticker}`}
                   >
-                    <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center justify-between mb-1.5">
                       <div className="flex items-center gap-2">
-                        <div
-                          className={`w-4 h-4 rounded border-2 flex items-center justify-center transition-colors ${
-                            d.selected
-                              ? "bg-primary border-primary"
-                              : "border-muted-foreground"
-                          }`}
-                        >
-                          {d.selected && <Check className="w-3 h-3 text-primary-foreground" />}
+                        <div className={`w-3.5 h-3.5 rounded border-2 flex items-center justify-center transition-colors ${
+                          d.selected ? "bg-primary border-primary" : "border-muted-foreground"
+                        }`}>
+                          {d.selected && <Check className="w-2.5 h-2.5 text-primary-foreground" />}
                         </div>
                         <span className="font-mono font-bold text-sm">{d.ticker}</span>
-                        <Badge
-                          variant="outline"
-                          className={`text-[10px] ${
-                            d.action === "create"
-                              ? "text-emerald-400 border-emerald-500/30"
-                              : "text-blue-400 border-blue-500/30"
-                          }`}
-                        >
+                        <Badge variant="outline" className={`text-[10px] ${
+                          d.action === "create" ? "text-emerald-400 border-emerald-500/30"
+                            : d.notes === "Transaction merge" ? "text-blue-400 border-blue-500/30"
+                            : "text-amber-400 border-amber-500/30"
+                        }`}>
                           {d.action === "create" ? "New" : d.notes === "Transaction merge" ? "Merge" : "Sync"}
                         </Badge>
                       </div>
-                      {d.notes && (
-                        <span className="text-[10px] text-muted-foreground truncate max-w-[140px]">
-                          {d.notes}
-                        </span>
-                      )}
                     </div>
-
                     <div className="grid grid-cols-2 gap-3 text-xs">
                       <div>
                         <span className="text-[10px] text-muted-foreground">Shares</span>
                         <div className="font-mono">
                           {d.action === "update" ? (
-                            <span>
-                              <span className="text-muted-foreground">{d.existing_shares.toFixed(4)}</span>
-                              <span className="text-foreground"> → {d.new_shares.toFixed(4)}</span>
-                            </span>
+                            <><span className="text-muted-foreground">{d.existing_shares.toFixed(4)}</span>
+                            <span className="text-foreground"> → {d.new_shares.toFixed(4)}</span></>
                           ) : (
                             <span className="text-emerald-400">{d.new_shares.toFixed(4)}</span>
                           )}
@@ -370,10 +485,8 @@ export default function ToolsImport() {
                         <span className="text-[10px] text-muted-foreground">Avg Cost</span>
                         <div className="font-mono">
                           {d.action === "update" ? (
-                            <span>
-                              <span className="text-muted-foreground">${d.existing_avg_cost.toFixed(2)}</span>
-                              <span className="text-foreground"> → ${d.new_avg_cost.toFixed(2)}</span>
-                            </span>
+                            <><span className="text-muted-foreground">${d.existing_avg_cost.toFixed(2)}</span>
+                            <span className="text-foreground"> → ${d.new_avg_cost.toFixed(2)}</span></>
                           ) : (
                             <span className="text-foreground">${d.new_avg_cost.toFixed(2)}</span>
                           )}
@@ -386,15 +499,51 @@ export default function ToolsImport() {
             </div>
           )}
 
-          {/* Unchanged items (collapsed) */}
-          {diff.filter((d) => d.notes === "No change").length > 0 && (
+          {/* Missing items (portfolio mode only) */}
+          {missing.length > 0 && (
+            <div className="space-y-2">
+              <span className="text-[10px] font-medium text-red-400 uppercase tracking-wider flex items-center gap-1">
+                <Trash2 className="w-3 h-3" />
+                Not found in screenshots — remove?
+              </span>
+              <p className="text-[10px] text-muted-foreground">
+                These holdings are in your portfolio but weren't in any screenshot. Select to remove if you've sold them.
+              </p>
+              {missing.map((m, i) => (
+                <div
+                  key={m.ticker}
+                  className={`rounded-lg border bg-card p-3 transition-colors cursor-pointer ${
+                    m.selected ? "border-red-500/40" : "border-border opacity-60"
+                  }`}
+                  onClick={() => toggleMissing(i)}
+                  data-testid={`card-missing-${m.ticker}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <div className={`w-3.5 h-3.5 rounded border-2 flex items-center justify-center transition-colors ${
+                      m.selected ? "bg-red-500 border-red-500" : "border-muted-foreground"
+                    }`}>
+                      {m.selected && <X className="w-2.5 h-2.5 text-white" />}
+                    </div>
+                    <span className="font-mono font-bold text-sm">{m.ticker}</span>
+                    <Badge variant="outline" className="text-[10px] text-red-400 border-red-500/30">Remove</Badge>
+                    <span className="text-[10px] text-muted-foreground ml-auto">
+                      {m.existing_shares.toFixed(4)} @ ${m.existing_avg_cost.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Unchanged (collapsed) */}
+          {unchangedItems.length > 0 && (
             <div className="space-y-2">
               <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-                No change ({diff.filter((d) => d.notes === "No change").length})
+                No change ({unchangedItems.length})
               </span>
               <div className="rounded-lg border border-border bg-card/30 p-3">
                 <div className="flex flex-wrap gap-1.5">
-                  {diff.filter((d) => d.notes === "No change").map((d) => (
+                  {unchangedItems.map((d) => (
                     <span key={d.ticker} className="text-[10px] font-mono text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded">
                       {d.ticker}
                     </span>
@@ -404,25 +553,26 @@ export default function ToolsImport() {
             </div>
           )}
 
+          {/* Actions */}
           <div className="flex gap-2">
-            <Button variant="outline" onClick={reset} className="flex-1 gap-1.5" data-testid="button-cancel-import">
-              <X className="w-3.5 h-3.5" />
-              Cancel
+            <Button variant="outline" onClick={() => { setStage("collecting"); setDiff([]); setMissing([]); }} className="flex-1 gap-1.5" data-testid="button-back-collecting">
+              <ArrowLeft className="w-3.5 h-3.5" />
+              Add More
             </Button>
             <Button
               onClick={() => applyMutation.mutate()}
-              disabled={selectedCount === 0}
+              disabled={selectedChanges + selectedDeletions === 0}
               className="flex-1 gap-1.5"
               data-testid="button-apply-import"
             >
               <Check className="w-3.5 h-3.5" />
-              Apply {selectedCount} Change(s)
+              Apply {selectedChanges + selectedDeletions}
             </Button>
           </div>
         </div>
       )}
 
-      {/* Stage: Applying */}
+      {/* ── Applying ── */}
       {stage === "applying" && (
         <div className="rounded-lg border border-border bg-card p-12 text-center">
           <Loader2 className="w-8 h-8 text-primary animate-spin mx-auto mb-3" />
@@ -430,23 +580,18 @@ export default function ToolsImport() {
         </div>
       )}
 
-      {/* Stage: Done */}
+      {/* ── Done ── */}
       {stage === "done" && (
         <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-8 text-center space-y-3">
           <CheckCircle2 className="w-8 h-8 text-emerald-400 mx-auto" />
           <p className="text-sm font-medium text-foreground">Import complete</p>
-          <p className="text-xs text-muted-foreground">
-            Your holdings have been updated.
-          </p>
+          <p className="text-xs text-muted-foreground">Your holdings have been updated.</p>
           <div className="flex justify-center gap-2 pt-2">
             <Button variant="outline" size="sm" onClick={reset} className="gap-1.5">
-              <Camera className="w-3.5 h-3.5" />
-              Import More
+              <Camera className="w-3.5 h-3.5" /> Import More
             </Button>
             <Link href="/">
-              <Button size="sm" className="gap-1.5">
-                View Portfolio
-              </Button>
+              <Button size="sm" className="gap-1.5">View Portfolio</Button>
             </Link>
           </div>
         </div>
